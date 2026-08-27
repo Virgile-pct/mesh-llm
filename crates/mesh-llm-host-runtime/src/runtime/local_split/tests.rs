@@ -1089,6 +1089,7 @@ async fn load_split_runtime_generation_stops_candidate_stages_after_partial_load
         node: &node,
         mesh_config: &mesh_config,
         model_ref: "Qwen",
+        config_model_id: None,
         model_path: &model_path,
         package: &package,
         generation: &generation,

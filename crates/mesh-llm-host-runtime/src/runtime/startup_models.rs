@@ -32,7 +32,16 @@ pub(super) struct StartupModelSpec {
     pub(super) mmproj_ref: Option<PathBuf>,
     pub(super) ctx_size: Option<u32>,
     pub(super) gpu_id: Option<String>,
-    pub(super) config_owned: bool,
+    /// Whether pinned startup preflight must resolve this model's GPU selector.
+    ///
+    /// This is deliberately narrower than model ownership: an explicit CLI
+    /// `--model` can opt in when it exactly matches a configured model ref,
+    /// while ad-hoc CLI models and all `--gguf` paths remain unpinned.
+    pub(super) resolve_pinned_gpu: bool,
+    /// The config entry to use for config-derived runtime metadata. Exact CLI
+    /// matches leave this unset so CLI selection, context, and projector
+    /// overrides do not accidentally inherit unrelated config fields.
+    pub(super) config_model_id: Option<String>,
     pub(super) parallel: Option<usize>,
     pub(super) cache_type_k: Option<String>,
     pub(super) cache_type_v: Option<String>,
@@ -64,6 +73,7 @@ pub(super) struct StartupModelPlan {
     pub(super) mmproj_path: Option<PathBuf>,
     pub(super) ctx_size: Option<u32>,
     pub(super) gpu_id: Option<String>,
+    pub(super) config_model_id: Option<String>,
     pub(super) pinned_gpu: Option<StartupPinnedGpuTarget>,
     pub(super) parallel: Option<usize>,
     pub(super) cache_type_k: Option<String>,
@@ -456,7 +466,7 @@ pub(super) async fn resolve_eager_startup_models(
     startup_specs: &[StartupModelSpec],
 ) -> Result<Vec<StartupModelPlan>> {
     let mut startup_models = resolve_startup_models(startup_specs, options.split).await?;
-    preflight_config_owned_startup_models(
+    preflight_pinned_startup_models(
         config,
         startup_specs,
         &mut startup_models,
@@ -611,6 +621,63 @@ fn is_plain_model_alias(candidate: &str) -> bool {
         && !candidate.contains('@')
 }
 
+/// Return the effective GPU selector configured for a model entry.
+///
+/// Parsed entries normally expose `hardware.device` through `gpu_id`, but
+/// checking both forms keeps startup planning correct for programmatically
+/// constructed configs as well. Defaults are inherited by the runtime config
+/// resolver and therefore belong in the pinned selector used at preflight.
+fn configured_model_gpu_id(
+    config: &plugin::MeshConfig,
+    model: &plugin::ModelConfigEntry,
+) -> Option<String> {
+    model
+        .hardware
+        .as_ref()
+        .and_then(|hardware| hardware.device.clone())
+        .or_else(|| model.gpu_id.clone())
+        .or_else(|| configured_default_gpu_id(config))
+}
+
+/// Return the global device selector that applies when a model entry does not
+/// override it. This is separate from model matching so ad-hoc CLI models can
+/// inherit global policy without becoming config-owned.
+fn configured_default_gpu_id(config: &plugin::MeshConfig) -> Option<String> {
+    config
+        .defaults
+        .as_ref()
+        .and_then(|defaults| defaults.hardware.as_ref())
+        .and_then(|hardware| hardware.device.clone())
+}
+
+/// Match only the exact text supplied to `--model` against a configured model
+/// ref. Paths, aliases, and `--gguf` inputs intentionally do not participate:
+/// an explicit local file must remain an ad-hoc startup model. A CLI model has
+/// no profile selector, so duplicate configured refs are rejected instead of
+/// inheriting an arbitrary entry's hardware settings.
+fn matching_config_model<'a>(
+    config: &'a plugin::MeshConfig,
+    model_ref: &Path,
+) -> Result<Option<&'a plugin::ModelConfigEntry>> {
+    let Some(model_ref) = model_ref.to_str() else {
+        return Ok(None);
+    };
+    let mut matches = config
+        .models
+        .iter()
+        .filter(|model| model.model == model_ref);
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        anyhow::bail!(
+            "CLI --model '{}' matches multiple configured model entries; select a unique configured model ref",
+            model_ref
+        );
+    }
+    Ok(Some(first))
+}
+
 pub(super) fn build_startup_model_specs(
     options: &RuntimeOptions,
     config: &plugin::MeshConfig,
@@ -634,8 +701,9 @@ pub(super) fn build_startup_model_specs(
                 declared_ref: Some(alias),
                 mmproj_ref: options.mmproj.clone(),
                 ctx_size: options.ctx_size,
-                gpu_id: None,
-                config_owned: false,
+                gpu_id: configured_default_gpu_id(config),
+                resolve_pinned_gpu: false,
+                config_model_id: None,
                 parallel: None,
                 cache_type_k: None,
                 cache_type_v: None,
@@ -656,8 +724,9 @@ pub(super) fn build_startup_model_specs(
                 declared_ref: None,
                 mmproj_ref: None,
                 ctx_size: options.ctx_size,
-                gpu_id: None,
-                config_owned: false,
+                gpu_id: configured_default_gpu_id(config),
+                resolve_pinned_gpu: false,
+                config_model_id: None,
                 parallel: None,
                 cache_type_k: None,
                 cache_type_v: None,
@@ -668,13 +737,17 @@ pub(super) fn build_startup_model_specs(
             });
         }
         for model in &options.model {
+            let matching_config = matching_config_model(config, model)?;
             specs.push(StartupModelSpec {
                 model_ref: model.clone(),
                 declared_ref: None,
                 mmproj_ref: None,
                 ctx_size: options.ctx_size,
-                gpu_id: None,
-                config_owned: false,
+                gpu_id: matching_config
+                    .and_then(|model| configured_model_gpu_id(config, model))
+                    .or_else(|| configured_default_gpu_id(config)),
+                resolve_pinned_gpu: matching_config.is_some(),
+                config_model_id: None,
                 parallel: None,
                 cache_type_k: None,
                 cache_type_v: None,
@@ -741,8 +814,9 @@ pub(super) fn build_startup_model_specs(
             declared_ref,
             mmproj_ref: model.mmproj.as_ref().map(PathBuf::from),
             ctx_size: options.ctx_size.or(model.ctx_size),
-            gpu_id: model.gpu_id.clone(),
-            config_owned: true,
+            gpu_id: configured_model_gpu_id(config, model),
+            resolve_pinned_gpu: true,
+            config_model_id: Some(model.model.clone()),
             parallel: model.parallel,
             cache_type_k: model.cache_type_k.clone(),
             cache_type_v: model.cache_type_v.clone(),
@@ -788,6 +862,7 @@ pub(super) async fn resolve_local_model_only_startup_models(
             mmproj_path,
             ctx_size: spec.ctx_size,
             gpu_id: spec.gpu_id.clone(),
+            config_model_id: spec.config_model_id.clone(),
             pinned_gpu: None,
             parallel: spec.parallel,
             cache_type_k: spec.cache_type_k.clone(),
@@ -876,6 +951,7 @@ async fn resolve_startup_models_with_package_discovery(
             mmproj_path,
             ctx_size: spec.ctx_size,
             gpu_id: spec.gpu_id.clone(),
+            config_model_id: spec.config_model_id.clone(),
             pinned_gpu: None,
             parallel: spec.parallel,
             cache_type_k: spec.cache_type_k.clone(),
@@ -933,7 +1009,7 @@ pub(super) fn resolve_split_layer_package(model_query: &str, model_path: &Path) 
     models::remote_catalog::find_huggingface_layer_package(model_query)
 }
 
-pub(super) fn preflight_config_owned_startup_models(
+pub(super) fn preflight_pinned_startup_models(
     config: &plugin::MeshConfig,
     specs: &[StartupModelSpec],
     plans: &mut [StartupModelPlan],
@@ -949,13 +1025,7 @@ pub(super) fn preflight_config_owned_startup_models(
         .or(binary_flavor);
     let mut survey = hardware::query(pinned_startup_preflight_metrics());
     apply_backend_devices_for_flavor(&mut survey.gpus, binary_flavor);
-    preflight_config_owned_startup_models_with_gpus(
-        config,
-        specs,
-        plans,
-        &survey.gpus,
-        backend_probe,
-    )
+    preflight_pinned_startup_models_with_gpus(config, specs, plans, &survey.gpus, backend_probe)
 }
 
 pub(super) fn apply_backend_devices_for_flavor(
@@ -987,7 +1057,7 @@ pub(super) fn pinned_startup_preflight_metrics() -> &'static [hardware::Metric] 
     ]
 }
 
-pub(super) fn preflight_config_owned_startup_models_with_gpus(
+pub(super) fn preflight_pinned_startup_models_with_gpus(
     config: &plugin::MeshConfig,
     specs: &[StartupModelSpec],
     plans: &mut [StartupModelPlan],
@@ -1004,7 +1074,7 @@ pub(super) fn preflight_config_owned_startup_models_with_gpus(
     );
 
     for (spec, plan) in specs.iter().zip(plans.iter_mut()) {
-        if !spec.config_owned {
+        if !spec.resolve_pinned_gpu && plan.gpu_id.is_none() {
             continue;
         }
 

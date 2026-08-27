@@ -9,6 +9,7 @@ use crate::mesh;
 use crate::models;
 use crate::plugin;
 use crate::runtime::local::skippy_native_model_open_event_reporter;
+use crate::runtime::local::startup_model_resolution_config;
 use crate::runtime::local_package::{
     split_node_labels, split_participant_set_hash, split_topology_hash,
 };
@@ -29,6 +30,7 @@ pub(super) struct SplitGenerationLoadSpec<'a> {
     pub(super) node: &'a mesh::Node,
     pub(super) mesh_config: &'a plugin::MeshConfig,
     pub(super) model_ref: &'a str,
+    pub(super) config_model_id: Option<&'a str>,
     pub(super) model_path: &'a Path,
     pub(super) package: &'a skippy::SkippyPackageIdentity,
     pub(super) generation: &'a SplitTopologyGeneration,
@@ -461,8 +463,9 @@ pub(super) fn split_generation_load_settings<'a>(
     let load_mode = split_generation_load_mode(spec.package);
     let activation_width =
         skippy_stage_activation_width(spec.package.activation_width, spec.model_ref)?;
+    let mesh_config = startup_model_resolution_config(spec.mesh_config, spec.config_model_id);
     let mut resolved = skippy::resolve_skippy_config(skippy::SkippyConfigResolveRequest {
-        mesh_config: spec.mesh_config,
+        mesh_config: &mesh_config,
         model_id: spec.model_ref,
         model_path: spec.model_path,
         model_bytes: spec.package.source_model_bytes,

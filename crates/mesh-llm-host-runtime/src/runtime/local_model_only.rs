@@ -3,7 +3,7 @@ use super::{
     SkippyNativeLogForwardingGuard, acquire_instance_runtime,
     apply_runtime_cli_speculative_overrides, apply_runtime_config_options,
     build_startup_model_specs, cleanup_run_auto_runtime_dir, configure_run_auto_process_state,
-    emit_shutdown, openai_guardrail_policy_handle, preflight_config_owned_startup_models,
+    emit_shutdown, openai_guardrail_policy_handle, preflight_pinned_startup_models,
     resolve_local_model_only_startup_models, runtime_model_required_bytes,
     skippy_telemetry_options, start_local_openai_model, wait_shutdown_signal,
 };
@@ -119,7 +119,7 @@ pub(super) async fn run_local_model_only(mut options: RuntimeOptions) -> Result<
         "--local-model-only requires exactly one startup model"
     );
     let mut startup_models = resolve_local_model_only_startup_models(&startup_specs).await?;
-    preflight_config_owned_startup_models(
+    preflight_pinned_startup_models(
         &config,
         &startup_specs,
         &mut startup_models,
@@ -158,7 +158,7 @@ pub(super) async fn run_local_model_only(mut options: RuntimeOptions) -> Result<
     let model_name = model.declared_ref.clone();
     let launch = LocalOpenAiModelStartSpec {
         mesh_config: &config,
-        config_model_id: Some(&model.declared_ref),
+        config_model_id: model.config_model_id.as_deref(),
         model_path: &model.resolved_path,
         model_bytes,
         mmproj_override: model.mmproj_path.as_deref(),

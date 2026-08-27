@@ -19,6 +19,7 @@ use mesh_llm_events::{OutputEvent, emit_event};
 use openai_frontend::OpenAiHookPolicy;
 use skippy_protocol::{FlashAttentionType, LoadMode};
 use skippy_server::serving_hooks::SharedModelServingHooksFactory;
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -310,8 +311,9 @@ pub(super) fn resolve_local_openai_skippy_config(
     slots: usize,
     fallback_projector_path: Option<PathBuf>,
 ) -> Result<skippy::ResolvedSkippyConfig> {
+    let mesh_config = startup_model_resolution_config(spec.mesh_config, spec.config_model_id);
     let mut resolved = skippy::resolve_skippy_config(skippy::SkippyConfigResolveRequest {
-        mesh_config: spec.mesh_config,
+        mesh_config: &mesh_config,
         model_id: spec.config_model_id.unwrap_or(model_name),
         model_path: spec.model_path,
         model_bytes,
@@ -346,6 +348,30 @@ pub(super) fn resolve_local_openai_skippy_config(
         resolved.hardware.device = Some(gpu.backend_device.clone());
     }
     Ok(resolved)
+}
+
+/// Keep explicit CLI startup models out of per-model config lookup while
+/// retaining global defaults. A config-owned startup model passes its logical
+/// id and therefore retains the full config for runtime metadata resolution.
+pub(super) fn startup_model_resolution_config<'a>(
+    mesh_config: &'a plugin::MeshConfig,
+    config_model_id: Option<&str>,
+) -> Cow<'a, plugin::MeshConfig> {
+    if config_model_id.is_some() {
+        return Cow::Borrowed(mesh_config);
+    }
+
+    let mut explicit_config = mesh_config.clone();
+    explicit_config.models.clear();
+    if let Some(hardware) = explicit_config
+        .defaults
+        .as_mut()
+        .and_then(|defaults| defaults.hardware.as_mut())
+    {
+        // The selected CLI artifact wins over a configured default path.
+        hardware.model_path = None;
+    }
+    Cow::Owned(explicit_config)
 }
 
 pub(super) async fn alloc_local_port() -> Result<u16> {
