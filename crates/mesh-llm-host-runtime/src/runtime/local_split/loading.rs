@@ -464,15 +464,17 @@ pub(super) fn split_generation_load_settings<'a>(
     let activation_width =
         skippy_stage_activation_width(spec.package.activation_width, spec.model_ref)?;
     let mesh_config = startup_model_resolution_config(spec.mesh_config, spec.config_model_id);
+    let config_model_id = spec.config_model_id.unwrap_or(spec.model_ref);
     let mut resolved = skippy::resolve_skippy_config(skippy::SkippyConfigResolveRequest {
         mesh_config: &mesh_config,
-        model_id: spec.model_ref,
+        model_id: config_model_id,
         model_path: spec.model_path,
         model_bytes: spec.package.source_model_bytes,
         allocatable_memory_bytes: spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()),
         request_defaults: None,
         package_generation: spec.package.generation.as_ref(),
     })?;
+    resolved.model_id = spec.model_ref.to_string();
     resolved.model_fit.ctx_size = spec.ctx_size;
     resolved.throughput.parallel = spec.slots;
     if let Some(cache_type_k) = spec.cache_type_k_override {

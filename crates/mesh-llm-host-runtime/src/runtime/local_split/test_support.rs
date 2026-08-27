@@ -399,7 +399,7 @@ stop = ["END"]
     let spec = SplitGenerationLoadSpec {
         node: &node,
         mesh_config: &mesh_config,
-        model_ref: "Qwen",
+        model_ref: "runtime/served-name",
         config_model_id: Some("Qwen"),
         model_path: &model_path,
         package: &package,
@@ -427,6 +427,10 @@ stop = ["END"]
     assert_eq!(settings.activation_wire_dtype, skippy::StageWireDType::Q8);
     assert_eq!(settings.runtime_options.n_threads, Some(6));
     assert_eq!(settings.runtime_options.n_threads_batch, Some(3));
+    assert_eq!(
+        settings.runtime_options.config.model_id,
+        "runtime/served-name"
+    );
     assert_eq!(settings.runtime_options.config.ctx_size, 8192);
     assert_eq!(settings.runtime_options.config.lane_count, 4);
     assert_eq!(settings.runtime_options.config.n_batch, Some(768));
