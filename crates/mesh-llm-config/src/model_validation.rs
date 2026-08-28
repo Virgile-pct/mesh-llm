@@ -1047,6 +1047,41 @@ model = "my-model"
     }
 
     #[test]
+    fn duplicate_public_served_identity_is_rejected() {
+        let public_identity = "Qwen/Qwen3-8B-GGUF:Q4_K_M";
+        let config: MeshConfig = toml::from_str(&format!(
+            r#"
+[[models]]
+model = "{public_identity}"
+ctx_size = 4096
+
+[[models]]
+model = "{public_identity}"
+ctx_size = 8192
+"#,
+        ))
+        .expect("config should parse before validation");
+
+        let diagnostics = validate_config_diagnostics(&config);
+        let text = legacy_validation_error_text(&diagnostics);
+
+        assert!(
+            !text.contains("duplicate model entry"),
+            "fixture must not trigger the existing model/profile duplicate check: {text}"
+        );
+        assert!(
+            text.contains("duplicate public served identity"),
+            "expected public identity collision, got: {text}"
+        );
+        assert!(text.contains("models[0]"), "missing first row: {text}");
+        assert!(text.contains("models[1]"), "missing second row: {text}");
+        assert!(
+            text.contains(public_identity),
+            "missing colliding public identity: {text}"
+        );
+    }
+
+    #[test]
     fn draft_model_rejects_bare_path_without_colon() {
         let config = MeshConfig {
             defaults: Some(ModelConfigDefaults {
