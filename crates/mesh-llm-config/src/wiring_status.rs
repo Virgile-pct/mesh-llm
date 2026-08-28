@@ -200,6 +200,13 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
         behavior: WiringBehavior::None,
     },
     WiringEntry {
+        path: "telemetry.prompt_shape_metrics",
+        status: WiringStatus::Wired,
+        owner: "PR8",
+        reason: "",
+        behavior: WiringBehavior::None,
+    },
+    WiringEntry {
         path: "telemetry.metrics.endpoint",
         status: WiringStatus::Wired,
         owner: "n/a",
@@ -509,10 +516,10 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
     },
     WiringEntry {
         path: "advanced.server.alias",
-        status: WiringStatus::Unwired,
+        status: WiringStatus::Wired,
         owner: "PR8",
-        reason: "Served identity, /v1/models, and routing never read it",
-        behavior: WiringBehavior::SilentNoOp,
+        reason: "",
+        behavior: WiringBehavior::None,
     },
     WiringEntry {
         path: "model",
@@ -803,10 +810,10 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
     },
     WiringEntry {
         path: "hardware.fit_target_mib",
-        status: WiringStatus::Partial,
-        owner: "PR3",
-        reason: "Offline GPU tuner reads it; live serving placement ignores it",
-        behavior: WiringBehavior::SilentNoOp,
+        status: WiringStatus::Wired,
+        owner: "n/a",
+        reason: "",
+        behavior: WiringBehavior::None,
     },
     WiringEntry {
         path: "hardware.safety_margin_gb",
@@ -1622,10 +1629,10 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
     },
     WiringEntry {
         path: "plugin.<name>.url",
-        status: WiringStatus::Partial,
+        status: WiringStatus::Wired,
         owner: "PR8",
-        reason: "Injected into a spawned child environment; does not connect to an already-running remote plugin, and command stays mandatory",
-        behavior: WiringBehavior::SilentNoOp,
+        reason: "",
+        behavior: WiringBehavior::None,
     },
     WiringEntry {
         path: "plugin.<name>.startup.connect_timeout_secs",
@@ -1643,10 +1650,10 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
     },
     WiringEntry {
         path: "plugin.<name>.startup.optional",
-        status: WiringStatus::Partial,
+        status: WiringStatus::Wired,
         owner: "PR8",
-        reason: "Controls command-resolution fatality only; spawn, connect, and init failures do not consistently honor it",
-        behavior: WiringBehavior::SilentNoOp,
+        reason: "",
+        behavior: WiringBehavior::None,
     },
     WiringEntry {
         path: "plugin.<name>.startup.lazy_start",

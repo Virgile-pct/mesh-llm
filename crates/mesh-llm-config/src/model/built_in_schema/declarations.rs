@@ -40,10 +40,9 @@ fn build_built_in_config_schema() -> ConfigSchema {
         telemetry_setting("telemetry.headers", ConfigValueSchema::object()),
         telemetry_setting("telemetry.export_interval_secs", ConfigValueSchema::Integer),
         telemetry_setting("telemetry.queue_size", ConfigValueSchema::Integer),
-        unsupported_setting(
+        telemetry_setting(
             "telemetry.prompt_shape_metrics",
             ConfigValueSchema::Boolean,
-            "Prompt-shape telemetry is intentionally disabled until the telemetry surface is reviewed.",
         ),
         telemetry_setting("telemetry.metrics.endpoint", ConfigValueSchema::Url),
         logging_audit_setting("logging.audit.enabled", ConfigValueSchema::Boolean),
@@ -447,7 +446,7 @@ fn hardware_settings(
         basic_setting(&format!("{prefix}.tensor_split"), tensor_split_schema()),
         basic_setting(
             &format!("{prefix}.split_mode"),
-            string_enum(["auto", "none", "layer", "row"]),
+            string_enum(["auto", "none", "layer", "row", "tensor"]),
         ),
         basic_setting(&format!("{prefix}.main_gpu"), ConfigValueSchema::Integer),
         basic_setting(&format!("{prefix}.cpu_moe"), bool_or_auto_schema()),
@@ -488,6 +487,14 @@ fn hardware_settings(
             ConfigValueSchema::Boolean,
         ),
         basic_setting(&format!("{prefix}.mmap"), bool_or_auto_schema()),
+        basic_setting(
+            &format!("{prefix}.use_mmap_prefetch"),
+            ConfigValueSchema::Boolean,
+        ),
+        basic_setting(
+            &format!("{prefix}.use_mmap_buffer"),
+            ConfigValueSchema::Boolean,
+        ),
         basic_setting(&format!("{prefix}.mlock"), ConfigValueSchema::Boolean),
         basic_setting(&format!("{prefix}.direct_io"), ConfigValueSchema::Boolean),
         basic_setting(&format!("{prefix}.repack"), ConfigValueSchema::Boolean),
@@ -716,7 +723,7 @@ fn speculative_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
 }
 
 fn request_defaults_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
-    vec![
+    let mut settings = vec![
         basic_setting(&format!("{prefix}.max_tokens"), ConfigValueSchema::Integer),
         basic_setting(&format!("{prefix}.stop"), string_or_list_schema()),
         basic_setting(&format!("{prefix}.temperature"), ConfigValueSchema::Float),
@@ -847,7 +854,14 @@ fn request_defaults_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
             ConfigValueSchema::object(),
             "Logprobs request defaults are explicitly rejected from persisted config.",
         ),
-    ]
+    ];
+    for setting in &mut settings {
+        if setting.support == ConfigSupportState::Supported {
+            setting.apply_mode = ConfigApplyMode::DynamicApply;
+            setting.restart_scope = ConfigRestartScope::None;
+        }
+    }
+    settings
 }
 
 fn multimodal_settings(

@@ -140,7 +140,7 @@ pub(crate) fn validate_hardware(
     }
     validate_optional_enum(
         config.split_mode.as_deref(),
-        &["auto", "none", "layer", "row"],
+        &["auto", "none", "layer", "row", "tensor"],
         &format!("{base_path}.split_mode"),
     )?;
     if let Some(value) = &config.cpu_moe {
@@ -262,12 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn mmap_native_controls_are_accepted_at_toml_boundary() {
+    fn mmap_native_controls_are_rejected_at_validation_boundary() {
         let config: MeshConfig = toml::from_str(
             "[defaults.hardware]\nuse_mmap_prefetch = true\nuse_mmap_buffer = true\n",
         )
         .expect("documented mmap controls must parse");
 
-        validate_config(&config).expect("documented mmap controls must validate");
+        let diagnostics = validate_config_diagnostics(&config);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.severity == crate::ConfigDiagnosticSeverity::Error
+                })
+                .count(),
+            2
+        );
     }
 }

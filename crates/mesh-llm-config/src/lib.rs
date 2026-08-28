@@ -48,9 +48,9 @@ pub use wiring_validation::wiring_manifest_diagnostics;
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigStore, GpuAssignment, LocalServingNodeConfig, MeshConfig, ModelRuntimeKind,
-        SpeculativeConfig, built_in_config_schema, canonicalize_built_in_config_identifier,
-        parse_config_toml, validate_config,
+        ConfigStore, GpuAssignment, LocalServingNodeConfig, MeshConfig, SpeculativeConfig,
+        built_in_config_schema, canonicalize_built_in_config_identifier, parse_config_toml,
+        validate_config,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -253,7 +253,6 @@ ctx_size = 4096
             .update(|config| {
                 config.configure_local_serving_node(LocalServingNodeConfig {
                     model: "Qwen/Qwen3-8B-GGUF:Q4_K_M".into(),
-                    runtime: Some(ModelRuntimeKind::Metal),
                     device: Some("metal:0".into()),
                     context_size: Some(8192),
                     parallel: Some(2),
@@ -279,15 +278,8 @@ ctx_size = 4096
             .unwrap();
 
         assert_eq!(config.models.len(), 1);
-        assert_eq!(
-            config.models[0]
-                .hardware
-                .as_ref()
-                .and_then(|hardware| hardware.model_runtime),
-            Some(ModelRuntimeKind::Metal)
-        );
         let raw = fs::read_to_string(path).unwrap();
-        assert!(raw.contains("model_runtime = \"metal\""));
+        assert!(!raw.contains("model_runtime"));
         assert!(raw.contains("ctx_size = 8192"));
         assert!(raw.contains("temperature = 0.2"));
     }
@@ -341,8 +333,8 @@ model_runtime = "bogus"
     }
 
     #[test]
-    fn parse_config_toml_accepts_mixed_case_runtime_kind() {
-        let config = parse_config_toml(
+    fn parse_config_toml_rejects_mixed_case_unsupported_runtime_kind() {
+        let error = parse_config_toml(
             r#"
 version = 1
 
@@ -353,14 +345,12 @@ model = "Qwen3-8B-Q4_K_M"
 model_runtime = "Metal"
 "#,
         )
-        .unwrap();
+        .expect_err("model_runtime has no runtime consumer");
 
-        assert_eq!(
-            config.models[0]
-                .hardware
-                .as_ref()
-                .and_then(|hardware| hardware.model_runtime),
-            Some(ModelRuntimeKind::Metal)
+        assert!(
+            error
+                .to_string()
+                .contains("hardware.model_runtime is not supported")
         );
     }
 

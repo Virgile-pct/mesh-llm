@@ -317,6 +317,7 @@ fn stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         cache_type_k: "f16".to_string(),
         cache_type_v: "q8_0".to_string(),
         flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
+        runtime_settings: Default::default(),
         native_mtp_enabled: true,
         shutdown_generation: 3,
         coordinator_term: 11,

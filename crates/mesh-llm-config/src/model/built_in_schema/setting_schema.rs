@@ -1,5 +1,6 @@
 fn top_level_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSettingSchema {
     let mut setting = basic_setting(path, value_schema);
+    setting.restart_scope = ConfigRestartScope::ProcessRestart;
     setting.visibility = if path == "version" {
         ConfigVisibility::Internal
     } else {
@@ -22,6 +23,7 @@ fn owner_control_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigS
 fn telemetry_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSettingSchema {
     let mut setting = basic_setting(path, value_schema);
     setting.control_surfaces = vec![ConfigControlSurface::ConfigFile, ConfigControlSurface::Api];
+    setting.restart_scope = ConfigRestartScope::ProcessRestart;
     setting
 }
 
@@ -46,6 +48,7 @@ fn runtime_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSetting
     let mut setting = basic_setting(path, value_schema);
     setting.control_surfaces = vec![ConfigControlSurface::ConfigFile, ConfigControlSurface::Api];
     setting.apply_mode = ConfigApplyMode::DynamicValidationOnly;
+    setting.restart_scope = ConfigRestartScope::ProcessRestart;
     setting
 }
 
@@ -200,18 +203,6 @@ fn basic_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSettingSc
         presentation: None,
         control_behavior: None,
     }
-}
-
-fn unsupported_setting(
-    path: &str,
-    value_schema: ConfigValueSchema,
-    description: &str,
-) -> ConfigSettingSchema {
-    let mut setting = basic_setting(path, value_schema);
-    setting.support = ConfigSupportState::Unsupported;
-    setting.restart_scope = ConfigRestartScope::None;
-    setting.description = Some(description.to_string());
-    setting
 }
 
 fn rejected_setting(

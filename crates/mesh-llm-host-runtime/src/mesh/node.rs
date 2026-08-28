@@ -668,6 +668,24 @@ impl Node {
         self.publish_routing_runtime_snapshot();
     }
 
+    pub(crate) fn record_prompt_shape(
+        &self,
+        model: Option<&str>,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        outcome: crate::network::metrics::RequestOutcome,
+    ) {
+        let model_ref = model.map(canonical_demand_model_ref);
+        if let Some(sink) = self.routing_telemetry_sink() {
+            sink.record_prompt_shape(
+                model_ref.as_deref(),
+                prompt_tokens,
+                completion_tokens,
+                outcome,
+            );
+        }
+    }
+
     pub fn local_request_metrics_snapshot(&self) -> LocalRequestMetricsSnapshot {
         self.local_request_metrics.snapshot()
     }

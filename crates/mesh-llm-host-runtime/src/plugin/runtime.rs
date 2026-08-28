@@ -1,7 +1,9 @@
 use super::config::{ExternalPluginSpec, PluginHostMode};
 use super::plugin_manifest_overview;
 use super::support::{plugin_error, serialize_params, summarize_capabilities};
-use super::transport::{LocalListener, LocalStream, bind_local_listener, connection_loop};
+use super::transport::{
+    LocalListener, LocalStream, bind_local_listener, connection_loop, reject_remote_control,
+};
 use super::{
     PROTOCOL_VERSION, PluginMeshEvent, PluginRpcBridge, PluginSummary, PluginWebUiState,
     PluginWebUiStateInput, REQUEST_TIMEOUT_SECS, ToolCallResult, ToolSummary,
@@ -38,12 +40,22 @@ pub(crate) struct ExternalPlugin {
 
 pub(crate) struct PluginRuntime {
     pub(crate) generation: u64,
-    pub(crate) _child: Child,
+    pub(crate) _child: Option<Child>,
+    connection_task: tokio::task::JoinHandle<()>,
     pub(crate) outbound_tx: mpsc::Sender<proto::Envelope>,
     pub(crate) pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>,
 }
 
 type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>;
+
+async fn stop_runtime(runtime: PluginRuntime, reason: &str) {
+    runtime.connection_task.abort();
+    let _ = runtime.connection_task.await;
+    let mut pending = runtime.pending.lock().await;
+    for (_, response) in pending.drain() {
+        let _ = response.send(Err(anyhow::anyhow!(reason.to_string())));
+    }
+}
 
 impl ExternalPlugin {
     pub(crate) async fn spawn(
@@ -67,7 +79,7 @@ impl ExternalPlugin {
                 pid: None,
                 version: None,
                 capabilities: Vec::new(),
-                command: Some(spec.command.clone()),
+                command: (!spec.command.is_empty()).then(|| spec.command.clone()),
                 args: spec.args.clone(),
                 tools: Vec::new(),
                 manifest: None,
@@ -207,7 +219,7 @@ impl ExternalPlugin {
 
     async fn install_runtime(
         &self,
-        child: Child,
+        child: Option<Child>,
         stream: LocalStream,
     ) -> (u64, mpsc::Sender<proto::Envelope>, PendingResponses) {
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
@@ -215,13 +227,7 @@ impl ExternalPlugin {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let outbound_tx_for_runtime = outbound_tx.clone();
         let outbound_tx_for_init = outbound_tx.clone();
-        *self.runtime.lock().await = Some(PluginRuntime {
-            generation,
-            _child: child,
-            outbound_tx,
-            pending: pending.clone(),
-        });
-        tokio::spawn(connection_loop(
+        let connection_task = tokio::spawn(connection_loop(
             stream,
             outbound_rx,
             pending.clone(),
@@ -233,6 +239,13 @@ impl ExternalPlugin {
             outbound_tx_for_runtime,
             generation,
         ));
+        *self.runtime.lock().await = Some(PluginRuntime {
+            generation,
+            _child: child,
+            connection_task,
+            outbound_tx,
+            pending: pending.clone(),
+        });
         (generation, outbound_tx_for_init, pending)
     }
 
@@ -394,6 +407,25 @@ impl ExternalPlugin {
 
         self.publish_starting_summary().await;
 
+        #[cfg(test)]
+        if let Some(address) = self
+            .spec
+            .url
+            .as_deref()
+            .and_then(|url| url.strip_prefix("test+tcp://"))
+        {
+            let stream = tokio::net::TcpStream::connect(address).await?;
+            let (generation, outbound_tx, pending) =
+                self.install_runtime(None, LocalStream::Tcp(stream)).await;
+            return self.finish_startup(generation, outbound_tx, pending).await;
+        }
+
+        if let Some(remote_url) = self.spec.url.as_deref()
+            && url::Url::parse(remote_url.trim()).is_ok_and(|url| url.scheme() == "tcp")
+        {
+            return reject_remote_control(remote_url);
+        }
+
         let listener = bind_local_listener(&self.instance_id, &self.spec.name).await?;
         let endpoint = listener.endpoint();
         let transport = listener.transport_name();
@@ -404,7 +436,41 @@ impl ExternalPlugin {
         self.summary.lock().await.pid = pid;
 
         let stream = self.await_plugin_connection(listener).await?;
-        let (generation, outbound_tx, pending) = self.install_runtime(child, stream).await;
+        let (generation, outbound_tx, pending) = self.install_runtime(Some(child), stream).await;
+        self.finish_startup(generation, outbound_tx, pending).await
+    }
+
+    async fn finish_startup(
+        &self,
+        generation: u64,
+        outbound_tx: mpsc::Sender<proto::Envelope>,
+        pending: PendingResponses,
+    ) -> Result<()> {
+        match self
+            .finish_initialize(generation, outbound_tx, pending)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if self.is_disabled().await {
+                    return Ok(());
+                }
+                self.handle_runtime_failure(
+                    Some(generation),
+                    format!("Plugin '{}' failed startup: {error}", self.spec.name),
+                )
+                .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn finish_initialize(
+        &self,
+        generation: u64,
+        outbound_tx: mpsc::Sender<proto::Envelope>,
+        pending: PendingResponses,
+    ) -> Result<()> {
         let init = self
             .initialize_runtime(generation, outbound_tx, pending)
             .await?;
@@ -495,10 +561,7 @@ impl ExternalPlugin {
 
         let runtime = self.runtime.lock().await.take();
         if let Some(runtime) = runtime {
-            let mut pending = runtime.pending.lock().await;
-            for (_, response) in pending.drain() {
-                let _ = response.send(Err(anyhow::anyhow!("plugin shutting down")));
-            }
+            stop_runtime(runtime, "plugin shutting down").await;
         }
 
         *self.server_info.lock().await = None;
@@ -788,14 +851,18 @@ impl ExternalPlugin {
     }
 
     async fn handle_runtime_failure(&self, generation: Option<u64>, reason: String) {
+        let reason = crate::logging::policy::redact_urls_in_text(&reason);
         let mut runtime = self.runtime.lock().await;
         let should_clear = generation
             .map(|generation| runtime.as_ref().map(|r| r.generation) == Some(generation))
             .unwrap_or(true);
-        if should_clear {
-            *runtime = None;
-        }
+        let failed_runtime = should_clear.then(|| runtime.take()).flatten();
         drop(runtime);
+        if let Some(runtime) = failed_runtime {
+            stop_runtime(runtime, &reason).await;
+        }
+        *self.server_info.lock().await = None;
+        *self.manifest.lock().await = None;
         let mut summary = self.summary.lock().await;
         summary.status = "restarting".into();
         summary.pid = None;
@@ -836,10 +903,14 @@ impl ExternalPlugin {
 
     async fn mark_disabled(&self, generation: u64, reason: String) {
         let mut runtime = self.runtime.lock().await;
-        if runtime.as_ref().map(|runtime| runtime.generation) == Some(generation) {
-            *runtime = None;
-        }
+        let disabled_runtime = (runtime.as_ref().map(|runtime| runtime.generation)
+            == Some(generation))
+        .then(|| runtime.take())
+        .flatten();
         drop(runtime);
+        if let Some(runtime) = disabled_runtime {
+            stop_runtime(runtime, "plugin disabled").await;
+        }
 
         let mut server_info = self.server_info.lock().await;
         *server_info = None;
@@ -856,7 +927,7 @@ impl ExternalPlugin {
         summary.version = None;
         summary.capabilities.clear();
         summary.tools.clear();
-        summary.error = Some(reason);
+        summary.error = Some(crate::logging::policy::redact_urls_in_text(&reason));
         drop(summary);
         self.publish_summary().await;
     }
@@ -1004,7 +1075,7 @@ mod tests {
                 pid: None,
                 version: None,
                 capabilities: Vec::new(),
-                command: Some(spec.command.clone()),
+                command: (!spec.command.is_empty()).then(|| spec.command.clone()),
                 args: spec.args.clone(),
                 tools: Vec::new(),
                 manifest: None,
@@ -1074,7 +1145,8 @@ mod tests {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
         *plugin.runtime.lock().await = Some(PluginRuntime {
             generation,
-            _child: child,
+            _child: Some(child),
+            connection_task: tokio::spawn(std::future::pending::<()>()),
             outbound_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
         });
@@ -1127,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_control_url_completes_plugin_initialize_without_child_process() {
+    async fn locally_connected_stream_completes_plugin_initialize_without_child_process() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("remote plugin listener");
@@ -1174,24 +1246,16 @@ mod tests {
         );
         spec.name = "remote-demo".into();
         spec.command.clear();
-        spec.url = Some(format!("tcp://{address}"));
-        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
-        let runtime_data = RuntimeDataCollector::new();
-
-        let plugin = ExternalPlugin::spawn(
-            &spec,
-            "remote-test".into(),
-            test_host_mode(),
-            mesh_tx,
-            Arc::new(Mutex::new(None)),
-            runtime_data.producer(RuntimeDataSource {
-                scope: "test",
-                plugin_data_key: None,
-                plugin_endpoint_key: None,
-            }),
-        )
-        .await
-        .expect("remote plugin should initialize");
+        let plugin = plugin_for_spec(spec);
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("local test connection");
+        let (generation, outbound_tx, pending) =
+            plugin.install_runtime(None, LocalStream::Tcp(stream)).await;
+        plugin
+            .finish_startup(generation, outbound_tx, pending)
+            .await
+            .expect("locally connected plugin should initialize");
         let summary = plugin.summary().await;
 
         assert_eq!(summary.status, "running");
@@ -1245,24 +1309,16 @@ mod tests {
         );
         spec.name = "remote-disabled".into();
         spec.command.clear();
-        spec.url = Some(format!("tcp://{address}"));
-        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
-        let runtime_data = RuntimeDataCollector::new();
-
-        let plugin = ExternalPlugin::spawn(
-            &spec,
-            "remote-test".into(),
-            test_host_mode(),
-            mesh_tx,
-            Arc::new(Mutex::new(None)),
-            runtime_data.producer(RuntimeDataSource {
-                scope: "test",
-                plugin_data_key: None,
-                plugin_endpoint_key: None,
-            }),
-        )
-        .await
-        .expect("plugin-owned disable is a successful startup outcome");
+        let plugin = plugin_for_spec(spec);
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("local test connection");
+        let (generation, outbound_tx, pending) =
+            plugin.install_runtime(None, LocalStream::Tcp(stream)).await;
+        plugin
+            .finish_startup(generation, outbound_tx, pending)
+            .await
+            .expect("plugin-owned disable is a successful startup outcome");
         let summary = plugin.summary().await;
 
         assert!(!summary.enabled);
@@ -1323,30 +1379,16 @@ mod tests {
         );
         spec.name = "remote-malformed".into();
         spec.command.clear();
-        spec.url = Some(format!("tcp://{address}"));
-        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
-        let runtime_data = RuntimeDataCollector::new();
-
-        let error = match ExternalPlugin::spawn(
-            &spec,
-            "remote-test".into(),
-            test_host_mode(),
-            mesh_tx,
-            Arc::new(Mutex::new(None)),
-            runtime_data.producer(RuntimeDataSource {
-                scope: "test",
-                plugin_data_key: None,
-                plugin_endpoint_key: None,
-            }),
-        )
-        .await
-        {
-            Ok(plugin) => {
-                plugin.shutdown().await;
-                panic!("malformed initialize metadata must fail startup");
-            }
-            Err(error) => error,
-        };
+        let plugin = plugin_for_spec(spec);
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("local test connection");
+        let (generation, outbound_tx, pending) =
+            plugin.install_runtime(None, LocalStream::Tcp(stream)).await;
+        let error = plugin
+            .finish_startup(generation, outbound_tx, pending)
+            .await
+            .expect_err("malformed initialize metadata must fail startup");
 
         assert!(error.to_string().contains("invalid server_info_json"));
         server.await.expect("remote server task");

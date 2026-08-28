@@ -75,6 +75,7 @@ pub(super) fn stage_load_request(load_mode: LoadMode) -> skippy::StageLoadReques
         cache_type_k: "f16".to_string(),
         cache_type_v: "f16".to_string(),
         flash_attn_type: FlashAttentionType::Auto,
+        runtime_settings: Default::default(),
         native_mtp_enabled: true,
         shutdown_generation: 1,
         coordinator_term: 1,

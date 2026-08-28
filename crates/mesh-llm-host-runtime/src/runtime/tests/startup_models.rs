@@ -731,10 +731,18 @@ alias = "public-model"
     assert_eq!(specs[0].model_ref, PathBuf::from("canonical/default-model"));
     assert_eq!(specs[0].declared_ref.as_deref(), Some("default-model"));
     assert_eq!(
+        specs[0].config_model_id.as_deref(),
+        Some("canonical/default-model")
+    );
+    assert_eq!(
         specs[1].model_ref,
         PathBuf::from("canonical/override-model")
     );
     assert_eq!(specs[1].declared_ref.as_deref(), Some("public-model"));
+    assert_eq!(
+        specs[1].config_model_id.as_deref(),
+        Some("canonical/override-model")
+    );
     assert!(specs.iter().all(|spec| spec.config_owned));
 }
 
@@ -801,6 +809,106 @@ parallel = 3
     assert_eq!(specs[0].flash_attention, FlashAttentionType::Enabled);
     assert!(!specs[0].profile.is_empty());
     assert!(!specs[0].config_owned);
+}
+
+#[test]
+fn startup_profile_uses_full_model_over_defaults_merge() {
+    let options = runtime_options_for_test(&["mesh-llm"]);
+    let config: plugin::MeshConfig = toml::from_str(
+        r#"
+[defaults.hardware]
+repack = true
+
+[[models]]
+model = "Qwen3-8B-Q4_K_M"
+
+[models.hardware]
+repack = false
+"#,
+    )
+    .expect("profile config parses");
+    let model = &config.models[0];
+
+    let specs = build_startup_model_specs(&options, &config).expect("startup specs");
+    let expected_profile = model
+        .with_profile_defaults(config.defaults.as_ref())
+        .derived_profile();
+    let defaults_only_profile = plugin::ModelConfigEntry {
+        model: model.model.clone(),
+        ..plugin::ModelConfigEntry::default()
+    }
+    .with_profile_defaults(config.defaults.as_ref())
+    .derived_profile();
+
+    assert_eq!(specs[0].profile, expected_profile);
+    assert_ne!(specs[0].profile, defaults_only_profile);
+}
+
+#[test]
+fn ad_hoc_model_inherits_default_mmproj_unless_cli_overrides_it() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let inherited = temp_dir.path().join("inherited-mmproj.gguf");
+    let explicit = temp_dir.path().join("explicit-mmproj.gguf");
+    std::fs::write(&inherited, b"gguf").expect("write inherited projector");
+    std::fs::write(&explicit, b"gguf").expect("write explicit projector");
+    let config: plugin::MeshConfig = toml::from_str(&format!(
+        r#"
+[defaults.multimodal]
+mmproj = {:?}
+"#,
+        inherited.to_string_lossy()
+    ))
+    .expect("defaults config parses");
+
+    let inherited_options = runtime_options_for_test(&["mesh-llm", "--model", "Qwen3-VL"]);
+    let inherited_specs =
+        build_startup_model_specs(&inherited_options, &config).expect("inherited startup specs");
+    assert_eq!(
+        inherited_specs[0].mmproj_ref.as_deref(),
+        Some(inherited.as_path())
+    );
+
+    let explicit_options = runtime_options_for_test(&[
+        "mesh-llm",
+        "--model",
+        "Qwen3-VL",
+        "--mmproj",
+        explicit.to_str().expect("explicit projector path"),
+    ]);
+    let explicit_specs =
+        build_startup_model_specs(&explicit_options, &config).expect("explicit startup specs");
+    assert_eq!(
+        explicit_specs[0].mmproj_ref.as_deref(),
+        Some(explicit.as_path())
+    );
+}
+
+#[tokio::test]
+async fn configured_alias_keeps_canonical_model_id_through_resolution() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let model_path = temp_dir.path().join("model.gguf");
+    std::fs::write(&model_path, b"gguf").expect("write model");
+    let config: plugin::MeshConfig = toml::from_str(&format!(
+        r#"
+[[models]]
+model = "canonical/model"
+[models.hardware]
+model_path = {:?}
+[models.advanced.server]
+alias = "public-model"
+"#,
+        model_path.to_string_lossy()
+    ))
+    .expect("model config parses");
+
+    let specs = build_startup_model_specs(&runtime_options_for_test(&["mesh-llm"]), &config)
+        .expect("startup specs");
+    let plans = resolve_local_model_only_startup_models(&specs)
+        .await
+        .expect("startup plans");
+
+    assert_eq!(plans[0].declared_ref, "public-model");
+    assert_eq!(plans[0].config_model_id.as_deref(), Some("canonical/model"));
 }
 
 #[test]
@@ -912,6 +1020,7 @@ async fn local_model_only_rejects_catalog_and_relative_model_refs() {
     let specs = [StartupModelSpec {
         model_ref: PathBuf::from("glm-4.7-flash"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: None,
         gpu_id: None,
@@ -1118,6 +1227,7 @@ fn pinned_gpu_startup_preflight_rejects_synthesized_backend_missing_from_probe()
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: Some(4096),
         gpu_id: Some("pci:0000:b3:00.0".into()),
@@ -1180,6 +1290,7 @@ fn pinned_gpu_startup_preflight_canonicalizes_rocm_hip_alias_from_probe() {
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: Some(4096),
         gpu_id: Some("pci:0000:b3:00.0".into()),
@@ -1345,6 +1456,7 @@ fn pinned_gpu_startup_preflight_missing_gpu_id_fails_closed() {
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: None,
         gpu_id: None,
@@ -1396,6 +1508,7 @@ fn pinned_gpu_startup_preflight_stores_resolved_pinned_target_in_plan() {
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: Some(4096),
         gpu_id: Some("uuid:GPU-123".into()),
@@ -1450,6 +1563,7 @@ fn pinned_gpu_startup_preflight_rejects_resolved_gpu_without_backend_device() {
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: Some(4096),
         gpu_id: Some("uuid:GPU-123".into()),
@@ -1501,6 +1615,7 @@ fn pinned_gpu_startup_preflight_unresolvable_gpu_id_fails_closed() {
     let specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: None,
         gpu_id: Some("pci:0000:b3:00.0".into()),
@@ -1558,6 +1673,7 @@ fn test_should_not_show_serve_config_help_when_models_are_present() {
     let startup_specs = vec![StartupModelSpec {
         model_ref: PathBuf::from("Qwen3-8B-Q4_K_M"),
         declared_ref: None,
+        config_model_id: None,
         mmproj_ref: None,
         ctx_size: None,
         gpu_id: None,
