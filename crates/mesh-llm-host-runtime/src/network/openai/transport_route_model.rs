@@ -396,7 +396,7 @@ fn handle_retryable_route_model_unavailable(
     RouteModelDisposition::Continue
 }
 
-fn finalize_route_model_result(
+pub(crate) fn finalize_route_model_result(
     _node: &mesh::Node,
     _model: &str,
     _request: &BufferedHttpRequest,

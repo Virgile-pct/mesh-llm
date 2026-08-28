@@ -851,6 +851,20 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
         behavior: WiringBehavior::None,
     },
     WiringEntry {
+        path: "hardware.use_mmap_prefetch",
+        status: WiringStatus::Unwired,
+        owner: "PR8",
+        reason: "The native model loader does not consume this option",
+        behavior: WiringBehavior::SilentNoOp,
+    },
+    WiringEntry {
+        path: "hardware.use_mmap_buffer",
+        status: WiringStatus::Unwired,
+        owner: "PR8",
+        reason: "The native model loader does not consume this option",
+        behavior: WiringBehavior::SilentNoOp,
+    },
+    WiringEntry {
         path: "hardware.mlock",
         status: WiringStatus::Wired,
         owner: "n/a",

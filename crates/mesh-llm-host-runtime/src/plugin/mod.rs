@@ -1612,6 +1612,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_plugin_summary_redacts_urls_before_serialization() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: "remote".into(),
+                enabled: Some(true),
+                web_ui_enabled: None,
+                command: None,
+                args: Vec::new(),
+                url: Some("tcp://127.0.0.1:19091".into()),
+                settings: Default::default(),
+                startup: PluginStartupConfig {
+                    optional: true,
+                    ..PluginStartupConfig::default()
+                },
+            }],
+            defaults: None,
+            ..MeshConfig::default()
+        };
+        let spec = resolve_plugins(&config, private_host_mode())
+            .expect("plugin config resolves")
+            .externals
+            .into_iter()
+            .find(|spec| spec.name == "remote")
+            .expect("remote spec");
+        let error = anyhow::anyhow!(
+            "connection to tcp://user:secret@127.0.0.1:19091/control?token=private failed"
+        );
+
+        let summary = PluginManager::plugin_load_failure_summary(&spec, &error);
+        let serialized = serde_json::to_string(&summary).expect("summary serializes");
+
+        assert!(!serialized.contains("user"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("private"));
+    }
+
+    #[test]
     fn optional_missing_installed_plugin_becomes_inactive_summary() {
         let config = MeshConfig {
             plugins: vec![PluginConfigEntry {
@@ -1708,6 +1745,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_plugin_control_url_does_not_require_a_local_command() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: "remote-plugin".into(),
+                enabled: Some(true),
+                web_ui_enabled: None,
+                command: None,
+                args: Vec::new(),
+                url: Some("tcp://127.0.0.1:19091".into()),
+                settings: Default::default(),
+                startup: Default::default(),
+            }],
+            defaults: None,
+            ..MeshConfig::default()
+        };
+
+        let resolved = resolve_plugins(&config, private_host_mode())
+            .expect("remote control URL should replace a local command");
+        let spec = resolved
+            .externals
+            .iter()
+            .find(|spec| spec.name == "remote-plugin")
+            .expect("remote plugin should resolve");
+
+        assert!(spec.command.is_empty());
+        assert_eq!(spec.url.as_deref(), Some("tcp://127.0.0.1:19091"));
+    }
+
+    #[test]
     fn external_plugin_can_be_enabled_with_command_args() {
         let config = MeshConfig {
             plugins: vec![PluginConfigEntry {
@@ -1791,7 +1857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_load_failure_becomes_inactive_summary() {
+    async fn required_plugin_load_failure_stops_manager_startup() {
         let specs = ResolvedPlugins {
             externals: vec![ExternalPluginSpec {
                 name: "broken".into(),
@@ -1807,15 +1873,53 @@ mod tests {
         };
         let (mesh_tx, _mesh_rx) = mpsc::channel(1);
 
+        let error = match PluginManager::start(&specs, private_host_mode(), mesh_tx).await {
+            Ok(manager) => {
+                manager.shutdown().await;
+                panic!("required plugin failure must stop manager startup");
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("broken"));
+    }
+
+    #[tokio::test]
+    async fn optional_plugin_load_failure_becomes_inactive_summary() {
+        let specs = ResolvedPlugins {
+            externals: vec![ExternalPluginSpec {
+                name: "optional-broken".into(),
+                command: "mesh-llm-definitely-missing-plugin-binary".into(),
+                args: Vec::new(),
+                url: None,
+                env: BTreeMap::new(),
+                startup: PluginStartupOptions {
+                    optional: true,
+                    ..PluginStartupOptions::default()
+                },
+                web_ui_enabled: None,
+                installed_metadata: None,
+            }],
+            inactive: Vec::new(),
+        };
+        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
+
         let manager = PluginManager::start(&specs, private_host_mode(), mesh_tx)
             .await
-            .expect("broken plugin should not stop manager startup");
+            .expect("optional plugin failure must not stop manager startup");
         let summaries = manager.list().await;
         manager.shutdown().await;
 
         assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].name, "broken");
+        assert_eq!(summaries[0].name, "optional-broken");
         assert_eq!(summaries[0].status, "error");
+        assert_eq!(
+            summaries[0]
+                .startup
+                .as_ref()
+                .map(|startup| startup.optional),
+            Some(true)
+        );
         assert!(!summaries[0].error.as_deref().unwrap_or_default().is_empty());
     }
 

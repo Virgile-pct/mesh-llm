@@ -1267,6 +1267,10 @@ fn service_version_attrs() -> Vec<KeyValue> {
 }
 
 #[cfg(test)]
+#[path = "survey_exact_head_tests.rs"]
+mod survey_exact_head_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugin::{MeshConfig, TelemetryConfig, TelemetryMetricsConfig};
@@ -1301,6 +1305,85 @@ mod tests {
             },
             defaults: None,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_shape_metrics_reach_the_otlp_http_boundary_without_private_labels() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("OTLP test listener");
+        let address = listener.local_addr().expect("OTLP listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("OTLP connection");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("OTLP request read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .expect("OTLP response");
+            request
+        });
+
+        let mut config = survey_config();
+        config.telemetry.endpoint = Some(format!("http://{address}/v1/metrics"));
+        config.telemetry.export_interval_secs = Some(1);
+        config.telemetry.prompt_shape_metrics = true;
+        let telemetry =
+            SurveyTelemetry::start(&config, hardware::HardwareSurvey::default(), test_source());
+        let sink = telemetry.routing_sink().expect("routing telemetry sink");
+        sink.record_prompt_shape(
+            Some("https://user:secret@example.test/private/model.gguf?token=leaked"),
+            Some(21),
+            Some(8),
+            RequestOutcome::Success(RequestService::Endpoint),
+        );
+
+        let request = tokio::time::timeout(Duration::from_secs(8), server)
+            .await
+            .expect("prompt shape metric must reach OTLP")
+            .expect("OTLP server task");
+        let exported = String::from_utf8_lossy(&request);
+        assert!(exported.contains("mesh_llm_prompt_tokens"));
+        assert!(exported.contains("mesh_llm_completion_tokens"));
+        for forbidden in [
+            "user",
+            "secret",
+            "example.test",
+            "token=leaked",
+            "/private",
+            "model.gguf",
+        ] {
+            assert!(
+                !exported.contains(forbidden),
+                "OTLP payload leaked {forbidden:?}: {exported}"
+            );
         }
     }
 

@@ -243,4 +243,24 @@ mod tests {
     use crate::{MeshConfig, validate_config, validate_config_diagnostics};
 
     include!("validate_gpu_tune_tests.rs");
+
+    #[test]
+    fn tensor_split_mode_is_accepted_by_static_validation() {
+        let config: MeshConfig = toml::from_str(
+            "[[models]]\nmodel = \"demo\"\n[models.hardware]\nsplit_mode = \"tensor\"\n",
+        )
+        .expect("tensor split mode must parse");
+
+        validate_config(&config).expect("tensor split mode must validate");
+    }
+
+    #[test]
+    fn mmap_native_controls_are_accepted_at_toml_boundary() {
+        let config: MeshConfig = toml::from_str(
+            "[defaults.hardware]\nuse_mmap_prefetch = true\nuse_mmap_buffer = true\n",
+        )
+        .expect("documented mmap controls must parse");
+
+        validate_config(&config).expect("documented mmap controls must validate");
+    }
 }

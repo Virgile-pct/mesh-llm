@@ -1277,3 +1277,81 @@ pub(super) fn stage_preparation_state_to_proto(
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyLoadStage {}
+
+    #[derive(Clone, PartialEq, Message)]
+    struct CompatLoadStage {
+        #[prost(message, optional, tag = "43")]
+        runtime_settings: Option<CompatRuntimeSettings>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct CompatRuntimeSettings {
+        #[prost(bool, optional, tag = "1")]
+        repack: Option<bool>,
+        #[prost(bool, optional, tag = "2")]
+        op_offload: Option<bool>,
+        #[prost(bool, optional, tag = "3")]
+        no_host_buffer: Option<bool>,
+        #[prost(bool, optional, tag = "4")]
+        check_tensors: Option<bool>,
+        #[prost(bool, optional, tag = "5")]
+        direct_io: Option<bool>,
+        #[prost(uint32, optional, tag = "6")]
+        main_gpu: Option<u32>,
+        #[prost(int32, optional, tag = "7")]
+        split_mode: Option<i32>,
+        #[prost(bool, optional, tag = "8")]
+        kv_offload: Option<bool>,
+        #[prost(bool, optional, tag = "9")]
+        kv_unified: Option<bool>,
+        #[prost(bool, optional, tag = "10")]
+        swa_full: Option<bool>,
+        #[prost(uint32, optional, tag = "11")]
+        cache_idle_slots: Option<u32>,
+    }
+
+    #[test]
+    fn stage_load_wire_round_trip_preserves_runtime_controls() {
+        let settings = CompatRuntimeSettings {
+            repack: Some(true),
+            op_offload: Some(false),
+            no_host_buffer: Some(true),
+            check_tensors: Some(true),
+            direct_io: Some(true),
+            main_gpu: Some(2),
+            split_mode: Some(3),
+            kv_offload: Some(false),
+            kv_unified: Some(true),
+            swa_full: Some(false),
+            cache_idle_slots: Some(3),
+        };
+        let mut encoded = skippy_stage_proto::LoadStage::default().encode_to_vec();
+        CompatLoadStage {
+            runtime_settings: Some(settings.clone()),
+        }
+        .encode(&mut encoded)
+        .expect("compat runtime settings encode");
+
+        let legacy = LegacyLoadStage::decode(encoded.as_slice())
+            .expect("legacy schema ignores additive runtime settings");
+        assert!(legacy.encode_to_vec().is_empty());
+
+        let decoded = skippy_stage_proto::LoadStage::decode(encoded.as_slice())
+            .expect("production load stage decode");
+        let request = stage_load_from_proto(decoded).expect("domain load request");
+        let reencoded = stage_load_to_proto(request).encode_to_vec();
+        let observed = CompatLoadStage::decode(reencoded.as_slice())
+            .expect("compat runtime settings decode")
+            .runtime_settings
+            .expect("runtime settings must survive production round trip");
+
+        assert_eq!(observed, settings);
+    }
+}
