@@ -64,7 +64,7 @@ pub use package::{
 };
 pub(crate) use resolver::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
-    resolve_skippy_config,
+    find_model_entry_for_refs, resolve_skippy_config,
 };
 pub(crate) use skippy_server::OpenAiGuardrailsStatus as SkippyOpenAiGuardrailsStatus;
 pub(crate) use stage::{

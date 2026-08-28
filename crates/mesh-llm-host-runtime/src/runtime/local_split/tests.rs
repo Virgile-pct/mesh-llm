@@ -1095,6 +1095,7 @@ async fn load_split_runtime_generation_stops_candidate_stages_after_partial_load
         projector_path: None,
         ctx_size: 4096,
         pinned_gpu: None,
+        device_override: None,
         slots: 1,
         cache_type_k_override: None,
         cache_type_v_override: None,

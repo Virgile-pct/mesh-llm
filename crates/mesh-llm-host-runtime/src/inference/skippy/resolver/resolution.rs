@@ -80,11 +80,12 @@ struct ResolverContext<'a> {
 impl<'a> ResolverContext<'a> {
     fn new(request: SkippyConfigResolveRequest<'a>) -> Self {
         let mesh_config = request.mesh_config;
-        let model_entry = mesh_config
-            .models
-            .iter()
-            .find(|entry| entry.model == request.model_id)
-            .or_else(|| find_model_entry_by_resolved_path(mesh_config, request.model_path));
+        let model_entry = find_model_entry_for_refs(
+            mesh_config,
+            Some(request.model_id),
+            None,
+            request.model_path,
+        );
         let defaults = mesh_config.defaults.as_ref();
         let model_fit = model_entry.and_then(|entry| entry.model_fit.as_ref());
         let global_model_fit = defaults.and_then(|value| value.model_fit.as_ref());
@@ -101,6 +102,39 @@ impl<'a> ResolverContext<'a> {
             global_throughput,
         }
     }
+}
+
+/// Find the configured model entry for a launch, preferring exact references
+/// before falling back to a configured model path.
+///
+/// Startup preflight and runtime config resolution must use the same lookup so
+/// a persisted hardware selector cannot be validated for one entry and then
+/// applied to another. When both references are supplied, the primary one
+/// (normally the declared alias) wins, followed by the model reference text,
+/// and finally the canonicalized `hardware.model_path`.
+pub(crate) fn find_model_entry_for_refs<'a>(
+    mesh_config: &'a crate::plugin::MeshConfig,
+    primary_ref: Option<&str>,
+    secondary_ref: Option<&str>,
+    model_path: &Path,
+) -> Option<&'a ModelConfigEntry> {
+    primary_ref
+        .and_then(|model_ref| find_model_entry_by_exact_ref(mesh_config, model_ref))
+        .or_else(|| {
+            secondary_ref
+                .and_then(|model_ref| find_model_entry_by_exact_ref(mesh_config, model_ref))
+        })
+        .or_else(|| find_model_entry_by_resolved_path(mesh_config, model_path))
+}
+
+fn find_model_entry_by_exact_ref<'a>(
+    mesh_config: &'a crate::plugin::MeshConfig,
+    model_ref: &str,
+) -> Option<&'a ModelConfigEntry> {
+    mesh_config
+        .models
+        .iter()
+        .find(|entry| entry.model == model_ref)
 }
 
 fn find_model_entry_by_resolved_path<'a>(

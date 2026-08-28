@@ -14,7 +14,7 @@ mod native_mtp_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use resolution::resolve_skippy_config;
+pub(crate) use resolution::{find_model_entry_for_refs, resolve_skippy_config};
 pub(crate) use types::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
 };

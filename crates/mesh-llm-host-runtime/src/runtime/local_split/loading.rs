@@ -35,6 +35,7 @@ pub(super) struct SplitGenerationLoadSpec<'a> {
     pub(super) projector_path: Option<String>,
     pub(super) ctx_size: u32,
     pub(super) pinned_gpu: Option<&'a crate::runtime::StartupPinnedGpuTarget>,
+    pub(super) device_override: Option<&'a str>,
     pub(super) slots: usize,
     pub(super) cache_type_k_override: Option<&'a str>,
     pub(super) cache_type_v_override: Option<&'a str>,
@@ -490,6 +491,9 @@ pub(super) fn split_generation_load_settings<'a>(
     }
     if let Some(gpu) = spec.pinned_gpu {
         resolved.hardware.device = Some(gpu.backend_device.clone());
+    }
+    if let Some(device) = spec.device_override {
+        resolved.hardware.device = Some(device.to_string());
     }
     let embedded_openai = resolved.to_embedded_openai_args(activation_width, true)?;
     let runtime_options = resolved.to_embedded_runtime_options(
