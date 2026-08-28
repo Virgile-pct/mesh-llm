@@ -509,6 +509,10 @@ pub struct HardwareConfig {
     #[serde(default)]
     pub mmap: Option<BoolOrAuto>,
     #[serde(default)]
+    pub use_mmap_prefetch: Option<bool>,
+    #[serde(default)]
+    pub use_mmap_buffer: Option<bool>,
+    #[serde(default)]
     pub mlock: Option<bool>,
     #[serde(default)]
     pub direct_io: Option<bool>,

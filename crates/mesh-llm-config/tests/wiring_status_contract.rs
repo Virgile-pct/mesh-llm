@@ -14,7 +14,10 @@
 //! `mesh-llm config validate` must flag `model_fit.keep_tokens = 128` as an
 //! error rather than reporting the config valid.
 
-use mesh_llm_config::{ConfigDiagnosticSeverity, MeshConfig, validate_config_diagnostics};
+use mesh_llm_config::{
+    ConfigDiagnosticSeverity, MeshConfig, WIRING_MANIFEST, WiringBehavior, WiringStatus,
+    built_in_config_schema, validate_config_diagnostics,
+};
 
 #[test]
 fn static_validation_flags_a_field_that_bails_at_model_load() {
@@ -42,6 +45,17 @@ keep_tokens = 128
          mesh-llm-host-runtime/src/inference/skippy/resolver/support.rs), but static \
          `mesh-llm config validate` reported no error for it: {diagnostics:#?}"
     );
+}
+
+#[test]
+fn fit_target_mib_manifest_matches_its_tuner_and_live_resolver_consumers() {
+    let entry = WIRING_MANIFEST
+        .iter()
+        .find(|entry| entry.path == "hardware.fit_target_mib")
+        .expect("fit_target_mib must remain in the exhaustive wiring manifest");
+
+    assert_eq!(entry.status, WiringStatus::Wired);
+    assert_eq!(entry.behavior, WiringBehavior::None);
 }
 
 #[test]
@@ -107,4 +121,112 @@ binary_stage_transport = "binary"
         "defaults.throughput.slot_prompt_similarity".to_string(),
     ]);
     assert_eq!(rejected, expected);
+}
+
+#[test]
+fn prompt_shape_metrics_are_accepted_for_bounded_otlp_export() {
+    let config: MeshConfig = toml::from_str(
+        r#"
+[telemetry]
+prompt_shape_metrics = true
+"#,
+    )
+    .expect("config should parse");
+
+    let diagnostics = validate_config_diagnostics(&config);
+
+    assert!(
+        diagnostics.is_empty(),
+        "prompt-shape metrics must pass static validation once their bounded exporter is wired: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn wiring_manifest_covers_every_builtin_schema_path_in_both_directions() {
+    let manifest = WIRING_MANIFEST
+        .iter()
+        .map(|entry| entry.path.trim_end_matches(".*"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let schema = built_in_config_schema();
+    let mut normalized = schema
+        .settings
+        .iter()
+        .map(|setting| {
+            let path = setting
+                .path
+                .render()
+                .replace("plugin.<plugin-name>", "plugin.<name>");
+            path.strip_prefix("defaults.")
+                .or_else(|| path.strip_prefix("models.<model-ref>."))
+                .unwrap_or(&path)
+                .trim_end_matches(".*")
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    normalized.insert("plugin.<name>.settings".to_string());
+
+    let missing = normalized
+        .iter()
+        .filter(|path| !manifest.contains(path.as_str()))
+        .collect::<Vec<_>>();
+    let stale = manifest
+        .iter()
+        .filter(|path| !normalized.contains(**path))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "schema paths missing from wiring manifest: {missing:?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "wiring manifest paths missing from schema: {stale:?}"
+    );
+}
+
+#[test]
+fn native_mmap_controls_and_tensor_split_mode_pass_static_validation() {
+    let config: MeshConfig = toml::from_str(
+        r#"
+[defaults.hardware]
+use_mmap_prefetch = true
+use_mmap_buffer = true
+split_mode = "tensor"
+"#,
+    )
+    .expect("documented native controls must parse");
+
+    let diagnostics = validate_config_diagnostics(&config);
+
+    assert!(
+        diagnostics.is_empty(),
+        "documented native controls must validate before runtime resolution: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn closeout_audit_names_every_manifest_row_and_required_boundary() {
+    let audit_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/CONFIGURATION_PR8_CLOSEOUT_AUDIT.md");
+    let audit = std::fs::read_to_string(&audit_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", audit_path.display()));
+
+    for entry in WIRING_MANIFEST {
+        assert!(
+            audit.contains(&format!("`{}`", entry.path)),
+            "closeout audit is missing manifest path {}",
+            entry.path
+        );
+    }
+    for boundary in [
+        "parsed",
+        "validated",
+        "final consumer",
+        "reverse audit",
+        "hardware limitation",
+    ] {
+        assert!(
+            audit.to_ascii_lowercase().contains(boundary),
+            "closeout audit is missing required evidence boundary {boundary:?}"
+        );
+    }
 }

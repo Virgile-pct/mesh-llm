@@ -707,6 +707,103 @@ fn test_build_startup_model_specs_uses_config_models_when_cli_is_empty() {
 }
 
 #[test]
+fn configured_server_alias_becomes_the_served_model_identity() {
+    let options = runtime_options_for_test(&["mesh-llm"]);
+    let config: plugin::MeshConfig = toml::from_str(
+        r#"
+[defaults.advanced.server]
+alias = "default-model"
+
+[[models]]
+model = "canonical/default-model"
+
+[[models]]
+model = "canonical/override-model"
+
+[models.advanced.server]
+alias = "public-model"
+"#,
+    )
+    .expect("aliased model config parses");
+
+    let specs = build_startup_model_specs(&options, &config).expect("startup specs");
+
+    assert_eq!(specs[0].model_ref, PathBuf::from("canonical/default-model"));
+    assert_eq!(specs[0].declared_ref.as_deref(), Some("default-model"));
+    assert_eq!(
+        specs[1].model_ref,
+        PathBuf::from("canonical/override-model")
+    );
+    assert_eq!(specs[1].declared_ref.as_deref(), Some("public-model"));
+    assert!(specs.iter().all(|spec| spec.config_owned));
+}
+
+#[test]
+fn ad_hoc_gguf_alias_preserves_existing_cli_model_overrides() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let model_path = temp_dir.path().join("model.gguf");
+    let projector_path = temp_dir.path().join("mmproj.gguf");
+    std::fs::write(&model_path, b"gguf").expect("write model");
+    std::fs::write(&projector_path, b"gguf").expect("write projector");
+    let options = runtime_options_for_test(&[
+        "mesh-llm",
+        "--gguf",
+        model_path.to_str().expect("model path"),
+        "--model",
+        "public-model",
+        "--mmproj",
+        projector_path.to_str().expect("projector path"),
+        "--ctx-size",
+        "8192",
+    ]);
+
+    let specs =
+        build_startup_model_specs(&options, &plugin::MeshConfig::default()).expect("startup specs");
+
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].declared_ref.as_deref(), Some("public-model"));
+    assert_eq!(
+        specs[0].mmproj_ref.as_deref(),
+        Some(projector_path.as_path())
+    );
+    assert_eq!(specs[0].ctx_size, Some(8192));
+    assert!(!specs[0].config_owned);
+}
+
+#[test]
+fn ad_hoc_model_inherits_applicable_config_defaults() {
+    let options = runtime_options_for_test(&["mesh-llm", "--model", "Qwen3-8B-Q4_K_M"]);
+    let config: plugin::MeshConfig = toml::from_str(
+        r#"
+[defaults.model_fit]
+ctx_size = 12288
+batch = 768
+ubatch = 192
+cache_type_k = "q8_0"
+cache_type_v = "q4_0"
+flash_attention = "enabled"
+
+[defaults.throughput]
+parallel = 3
+"#,
+    )
+    .expect("defaults config parses");
+
+    let specs = build_startup_model_specs(&options, &config).expect("startup specs");
+
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].ctx_size, Some(12288));
+    assert_eq!(specs[0].parallel, Some(3));
+    assert_eq!(specs[0].cache_type_k.as_deref(), Some("q8_0"));
+    assert_eq!(specs[0].cache_type_v.as_deref(), Some("q4_0"));
+    assert_eq!(specs[0].n_batch, Some(768));
+    assert_eq!(specs[0].n_ubatch, Some(192));
+    assert_eq!(specs[0].flash_attention, FlashAttentionType::Enabled);
+    assert!(!specs[0].profile.is_empty());
+    assert!(!specs[0].config_owned);
+}
+
+#[test]
 fn gguf_with_plain_model_name_binds_the_name_to_the_local_file() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let model_path = temp_dir.path().join("deepseek.gguf");
@@ -782,21 +879,22 @@ async fn config_hardware_model_path_loads_local_file_under_logical_model_identit
     let model_path = temp_dir.path().join("glm.gguf");
     std::fs::write(&model_path, b"gguf").expect("write model");
     let options = runtime_options_for_test(&["mesh-llm"]);
-    let config = plugin::MeshConfig {
-        models: vec![plugin::ModelConfigEntry {
-            model: "glm-4.7-flash".into(),
-            hardware: Some(plugin::HardwareConfig {
-                model_path: Some(model_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    let config: plugin::MeshConfig = toml::from_str(&format!(
+        r#"
+[[models]]
+model = "glm-4.7-flash"
+[models.hardware]
+model_path = {:?}
+[models.advanced.server]
+alias = "public-glm"
+"#,
+        model_path.to_string_lossy()
+    ))
+    .expect("aliased local model config parses");
 
     let specs = build_startup_model_specs(&options, &config).expect("startup specs");
     assert_eq!(specs[0].model_ref, model_path);
-    assert_eq!(specs[0].declared_ref.as_deref(), Some("glm-4.7-flash"));
+    assert_eq!(specs[0].declared_ref.as_deref(), Some("public-glm"));
 
     let plans = resolve_local_model_only_startup_models(&specs)
         .await
@@ -805,7 +903,8 @@ async fn config_hardware_model_path_loads_local_file_under_logical_model_identit
         plans[0].resolved_path,
         std::fs::canonicalize(&specs[0].model_ref).expect("canonical model path")
     );
-    assert_eq!(plans[0].declared_ref, "glm-4.7-flash");
+    assert_eq!(plans[0].declared_ref, "public-glm");
+    assert_eq!(plans[0].config_model_id.as_deref(), Some("glm-4.7-flash"));
 }
 
 #[tokio::test]

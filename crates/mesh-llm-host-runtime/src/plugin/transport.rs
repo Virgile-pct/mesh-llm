@@ -41,6 +41,7 @@ fn plugin_mesh_stream_error(message: impl Into<String>) -> super::proto::ErrorRe
 }
 
 pub(crate) enum LocalStream {
+    Tcp(tokio::net::TcpStream),
     #[cfg(unix)]
     Unix(tokio::net::UnixStream),
     #[cfg(windows)]
@@ -253,6 +254,7 @@ impl LocalListener {
 impl LocalStream {
     pub(crate) async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         match self {
+            LocalStream::Tcp(stream) => stream.write_all(bytes).await?,
             #[cfg(unix)]
             LocalStream::Unix(stream) => stream.write_all(bytes).await?,
             #[cfg(windows)]
@@ -265,6 +267,7 @@ impl LocalStream {
 
     pub(crate) async fn shutdown(&mut self) -> Result<()> {
         match self {
+            LocalStream::Tcp(stream) => stream.shutdown().await?,
             #[cfg(unix)]
             LocalStream::Unix(stream) => stream.shutdown().await?,
             #[cfg(windows)]
@@ -277,6 +280,7 @@ impl LocalStream {
 
     pub(crate) async fn read(&mut self, bytes: &mut [u8]) -> Result<usize> {
         let read = match self {
+            LocalStream::Tcp(stream) => stream.read(bytes).await?,
             #[cfg(unix)]
             LocalStream::Unix(stream) => stream.read(bytes).await?,
             #[cfg(windows)]
@@ -289,6 +293,9 @@ impl LocalStream {
 
     async fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
         match self {
+            LocalStream::Tcp(stream) => {
+                let _ = stream.read_exact(bytes).await?;
+            }
             #[cfg(unix)]
             LocalStream::Unix(stream) => {
                 let _ = stream.read_exact(bytes).await?;

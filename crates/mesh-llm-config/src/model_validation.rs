@@ -1390,6 +1390,119 @@ ctx_size = 8192
     }
 
     #[test]
+    fn duplicate_explicit_served_aliases_are_rejected() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[[models]]
+model = "canonical/first"
+[models.model_fit]
+ctx_size = 8192
+[models.advanced.server]
+alias = "public-model"
+
+[[models]]
+model = "canonical/second"
+[models.advanced.server]
+alias = "public-model"
+"#,
+        )
+        .expect("config should parse before validation");
+
+        let text = legacy_validation_error_text(&validate_config_diagnostics(&config));
+        assert!(text.contains("duplicate served model identity"), "{text}");
+        assert!(text.contains("public-model"), "{text}");
+    }
+
+    #[test]
+    fn duplicate_inherited_served_aliases_are_rejected() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[defaults.advanced.server]
+alias = "default-public-model"
+
+[[models]]
+model = "canonical/first"
+
+[[models]]
+model = "canonical/second"
+"#,
+        )
+        .expect("config should parse before validation");
+
+        let text = legacy_validation_error_text(&validate_config_diagnostics(&config));
+        assert!(text.contains("duplicate served model identity"), "{text}");
+        assert!(text.contains("default-public-model"), "{text}");
+    }
+
+    #[test]
+    fn served_alias_collisions_compare_trimmed_names() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[[models]]
+model = "canonical/first"
+[models.advanced.server]
+alias = " public-model "
+
+[[models]]
+model = "canonical/second"
+[models.advanced.server]
+alias = "public-model"
+"#,
+        )
+        .expect("config should parse before validation");
+
+        let text = legacy_validation_error_text(&validate_config_diagnostics(&config));
+        assert!(text.contains("duplicate served model identity"), "{text}");
+    }
+
+    #[test]
+    fn served_alias_collisions_include_defaults_merged_profiles() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[defaults.model_fit]
+ctx_size = 8192
+
+[[models]]
+model = "canonical/first"
+[models.model_fit]
+ctx_size = 8192
+[models.advanced.server]
+alias = "public-model"
+
+[[models]]
+model = "canonical/second"
+[models.advanced.server]
+alias = "public-model"
+"#,
+        )
+        .expect("config should parse before validation");
+
+        let text = legacy_validation_error_text(&validate_config_diagnostics(&config));
+        assert!(text.contains("duplicate served model identity"), "{text}");
+    }
+
+    #[test]
+    fn model_alias_override_avoids_inherited_alias_collision() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[defaults.advanced.server]
+alias = "default-public-model"
+
+[[models]]
+model = "canonical/first"
+
+[[models]]
+model = "canonical/second"
+[models.advanced.server]
+alias = "second-public-model"
+"#,
+        )
+        .expect("config should parse before validation");
+
+        validate_config(&config).expect("effective served identities are distinct");
+    }
+
+    #[test]
     fn draft_model_rejects_bare_path_without_colon() {
         let config = MeshConfig {
             defaults: Some(ModelConfigDefaults {

@@ -51,6 +51,8 @@ const REMOTE_UNCOMMITTED_RETRIES: usize = 1;
 #[path = "transport_route_model.rs"]
 mod route_model;
 pub(crate) use route_model::RouteModelRequestContext;
+#[cfg(test)]
+pub(crate) use route_model::finalize_route_model_result;
 pub use route_model::route_model_request;
 
 /// Response result returned to the ingress boundary. Unlike the historical

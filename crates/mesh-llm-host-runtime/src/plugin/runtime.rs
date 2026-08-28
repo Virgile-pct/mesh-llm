@@ -890,6 +890,7 @@ fn plugin_web_ui_asset_root(spec: &ExternalPluginSpec) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport::{read_envelope, write_envelope};
     use super::*;
     use crate::runtime_data::{PluginDataKey, RuntimeDataCollector, RuntimeDataSource};
     use mesh_llm_plugin::MeshVisibility;
@@ -901,6 +902,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn test_host_mode() -> PluginHostMode {
@@ -1102,6 +1104,252 @@ mod tests {
             command_env_value(&command, "MESH_LLM_PLUGIN_WEB_UI_DIR"),
             Some(asset_root.display().to_string())
         );
+    }
+
+    #[test]
+    fn child_env_includes_configured_plugin_url() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let mut spec = plugin_spec(
+            &temp_dir,
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        );
+        spec.url = Some("https://plugin.example.test/v1".into());
+        let plugin = plugin_for_spec(spec);
+
+        let command = plugin.configured_child_command("endpoint", "unix");
+
+        assert_eq!(
+            command_env_value(&command, "MESH_LLM_PLUGIN_URL"),
+            Some("https://plugin.example.test/v1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_control_url_completes_plugin_initialize_without_child_process() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("remote plugin listener");
+        let address = listener.local_addr().expect("listener address");
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("remote connection");
+            let mut stream = LocalStream::Tcp(stream);
+            let request = read_envelope(&mut stream)
+                .await
+                .expect("initialize request");
+            assert!(matches!(
+                request.payload,
+                Some(proto::envelope::Payload::InitializeRequest(_))
+            ));
+            write_envelope(
+                &mut stream,
+                &proto::Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    plugin_id: "remote-demo".into(),
+                    payload: Some(proto::envelope::Payload::InitializeResponse(
+                        proto::InitializeResponse {
+                            plugin_id: "remote-demo".into(),
+                            plugin_protocol_version: PROTOCOL_VERSION,
+                            plugin_version: "v1.0.0".into(),
+                            server_info_json: serde_json::to_string(&ServerInfo::default())
+                                .expect("server info"),
+                            capabilities: Vec::new(),
+                            manifest: None,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("initialize response");
+            let _ = release_rx.await;
+        });
+        let mut spec = plugin_spec(
+            &TempDir::new().expect("temp dir"),
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        );
+        spec.name = "remote-demo".into();
+        spec.command.clear();
+        spec.url = Some(format!("tcp://{address}"));
+        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
+        let runtime_data = RuntimeDataCollector::new();
+
+        let plugin = ExternalPlugin::spawn(
+            &spec,
+            "remote-test".into(),
+            test_host_mode(),
+            mesh_tx,
+            Arc::new(Mutex::new(None)),
+            runtime_data.producer(RuntimeDataSource {
+                scope: "test",
+                plugin_data_key: None,
+                plugin_endpoint_key: None,
+            }),
+        )
+        .await
+        .expect("remote plugin should initialize");
+        let summary = plugin.summary().await;
+
+        assert_eq!(summary.status, "running");
+        assert_eq!(summary.pid, None);
+        assert_eq!(summary.command, None);
+        let _ = release_tx.send(());
+        server.await.expect("remote server task");
+    }
+
+    #[tokio::test]
+    async fn startup_disabled_response_remains_a_successful_disabled_plugin() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("remote plugin listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("remote connection");
+            let mut stream = LocalStream::Tcp(stream);
+            let request = read_envelope(&mut stream)
+                .await
+                .expect("initialize request");
+            write_envelope(
+                &mut stream,
+                &proto::Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    plugin_id: "remote-disabled".into(),
+                    payload: Some(proto::envelope::Payload::ErrorResponse(
+                        proto::ErrorResponse {
+                            code: STARTUP_DISABLED_ERROR_CODE,
+                            message: "operator disabled this plugin".into(),
+                            data_json: String::new(),
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("disabled response");
+            let mut byte = [0_u8; 1];
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+                .await
+                .expect("self-disable must close the remote control socket")
+                .unwrap_or(0);
+            assert_eq!(read, 0);
+        });
+        let mut spec = plugin_spec(
+            &TempDir::new().expect("temp dir"),
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        );
+        spec.name = "remote-disabled".into();
+        spec.command.clear();
+        spec.url = Some(format!("tcp://{address}"));
+        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
+        let runtime_data = RuntimeDataCollector::new();
+
+        let plugin = ExternalPlugin::spawn(
+            &spec,
+            "remote-test".into(),
+            test_host_mode(),
+            mesh_tx,
+            Arc::new(Mutex::new(None)),
+            runtime_data.producer(RuntimeDataSource {
+                scope: "test",
+                plugin_data_key: None,
+                plugin_endpoint_key: None,
+            }),
+        )
+        .await
+        .expect("plugin-owned disable is a successful startup outcome");
+        let summary = plugin.summary().await;
+
+        assert!(!summary.enabled);
+        assert_eq!(summary.status, "disabled");
+        assert_eq!(
+            summary.error.as_deref(),
+            Some("operator disabled this plugin")
+        );
+        assert!(plugin.runtime.lock().await.is_none());
+        server.await.expect("remote server task");
+    }
+
+    #[tokio::test]
+    async fn malformed_initialize_metadata_rolls_back_remote_runtime() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("remote plugin listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("remote connection");
+            let mut stream = LocalStream::Tcp(stream);
+            let request = read_envelope(&mut stream)
+                .await
+                .expect("initialize request");
+            write_envelope(
+                &mut stream,
+                &proto::Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    plugin_id: "remote-malformed".into(),
+                    payload: Some(proto::envelope::Payload::InitializeResponse(
+                        proto::InitializeResponse {
+                            plugin_id: "remote-malformed".into(),
+                            plugin_protocol_version: PROTOCOL_VERSION,
+                            plugin_version: "v1.0.0".into(),
+                            server_info_json: "not-json".into(),
+                            capabilities: Vec::new(),
+                            manifest: None,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("initialize response");
+            let mut byte = [0_u8; 1];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
+                    .await
+                    .expect("failed startup should close connection")
+                    .unwrap_or(0);
+            assert_eq!(read, 0);
+        });
+        let mut spec = plugin_spec(
+            &TempDir::new().expect("temp dir"),
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        );
+        spec.name = "remote-malformed".into();
+        spec.command.clear();
+        spec.url = Some(format!("tcp://{address}"));
+        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
+        let runtime_data = RuntimeDataCollector::new();
+
+        let error = match ExternalPlugin::spawn(
+            &spec,
+            "remote-test".into(),
+            test_host_mode(),
+            mesh_tx,
+            Arc::new(Mutex::new(None)),
+            runtime_data.producer(RuntimeDataSource {
+                scope: "test",
+                plugin_data_key: None,
+                plugin_endpoint_key: None,
+            }),
+        )
+        .await
+        {
+            Ok(plugin) => {
+                plugin.shutdown().await;
+                panic!("malformed initialize metadata must fail startup");
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("invalid server_info_json"));
+        server.await.expect("remote server task");
     }
 
     #[test]

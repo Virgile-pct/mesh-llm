@@ -1306,6 +1306,23 @@ fn hardware_split_mode_rejects_invalid_value() {
     assert!(error.to_string().contains("split_mode"));
 }
 
+#[test]
+fn mmap_native_controls_and_tensor_mode_reach_serialized_stage_config() {
+    let mesh_config = parse_config(
+        "[defaults.hardware]\nuse_mmap_prefetch = true\nuse_mmap_buffer = true\nsplit_mode = \"tensor\"\n",
+    );
+    let model = temp_model_file();
+    let resolved = resolve_qwen_config_with_request_defaults(&mesh_config, model.path(), None);
+    let stage = resolved
+        .to_stage_config(Some(fake_package_identity(28)), LoadMode::RuntimeSlice)
+        .expect("stage config should build");
+    let value = serde_json::to_value(stage).expect("stage config serializes");
+
+    assert_eq!(value["use_mmap_prefetch"], Value::Bool(true));
+    assert_eq!(value["use_mmap_buffer"], Value::Bool(true));
+    assert_eq!(value["split_mode"], Value::String("tensor".into()));
+}
+
 /// JSON representation of a stage config with time-varying identifiers
 /// removed, so two configs built moments apart can be compared for
 /// deterministic content differences.
