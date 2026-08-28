@@ -184,7 +184,7 @@ fn wiring_manifest_covers_every_builtin_schema_path_in_both_directions() {
 }
 
 #[test]
-fn native_mmap_controls_and_tensor_split_mode_pass_static_validation() {
+fn native_mmap_controls_are_rejected_while_tensor_split_mode_remains_supported() {
     let config: MeshConfig = toml::from_str(
         r#"
 [defaults.hardware]
@@ -197,10 +197,50 @@ split_mode = "tensor"
 
     let diagnostics = validate_config_diagnostics(&config);
 
-    assert!(
-        diagnostics.is_empty(),
-        "documented native controls must validate before runtime resolution: {diagnostics:#?}"
+    let rejected = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == ConfigDiagnosticSeverity::Error)
+        .filter_map(|diagnostic| diagnostic.path.as_ref().map(|path| path.render()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        rejected,
+        std::collections::BTreeSet::from([
+            "defaults.hardware.use_mmap_buffer".to_string(),
+            "defaults.hardware.use_mmap_prefetch".to_string(),
+        ])
     );
+}
+
+#[test]
+fn every_silent_no_op_field_is_an_early_validation_error() {
+    let config: MeshConfig = toml::from_str(
+        r#"
+[defaults.hardware]
+model_runtime = "cuda"
+fit_target_mib = 8192
+fit_context = true
+lora_adapters = ["adapter.gguf"]
+control_vectors = ["control.gguf"]
+use_mmap_prefetch = true
+use_mmap_buffer = true
+warmup = true
+"#,
+    )
+    .expect("unsupported controls must still parse before validation");
+
+    let diagnostics = validate_config_diagnostics(&config);
+    let rejected = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == ConfigDiagnosticSeverity::Error)
+        .filter_map(|diagnostic| diagnostic.path.as_ref().map(|path| path.render()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = WIRING_MANIFEST
+        .iter()
+        .filter(|entry| entry.behavior == WiringBehavior::SilentNoOp)
+        .map(|entry| format!("defaults.{}", entry.path))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(rejected, expected);
 }
 
 #[test]
@@ -210,11 +250,27 @@ fn closeout_audit_names_every_manifest_row_and_required_boundary() {
     let audit = std::fs::read_to_string(&audit_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", audit_path.display()));
 
+    let reverse_audit = audit
+        .split_once("## Reverse audit")
+        .and_then(|(_, suffix)| suffix.split_once("## Closeout defects"))
+        .map(|(section, _)| section)
+        .expect("audit must contain a bounded reverse-audit section");
     for entry in WIRING_MANIFEST {
         assert!(
-            audit.contains(&format!("`{}`", entry.path)),
-            "closeout audit is missing manifest path {}",
+            reverse_audit.contains(&format!("`{}`", entry.path)),
+            "reverse audit inventory is missing manifest path {}",
             entry.path
+        );
+    }
+    for entry in WIRING_MANIFEST.iter().filter(|entry| entry.owner == "PR8") {
+        let row_prefix = format!("| `{}` |", entry.path);
+        let row = audit
+            .lines()
+            .find(|line| line.starts_with(&row_prefix))
+            .unwrap_or_else(|| panic!("forward audit is missing row {}", entry.path));
+        assert!(
+            row.matches('|').count() >= 6 && row.contains("::tests::"),
+            "forward audit row lacks executable evidence: {row}"
         );
     }
     for boundary in [

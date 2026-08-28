@@ -49,6 +49,13 @@ pub(crate) fn configured_disabled_installed_plugin_summary(
 pub(crate) fn configured_external_plugin_spec(
     entry: &PluginConfigEntry,
 ) -> Result<ConfiguredExternalPlugin> {
+    if entry.url.as_deref().is_some_and(|raw_url| {
+        url::Url::parse(raw_url.trim()).is_ok_and(|url| url.scheme() == "tcp")
+    }) {
+        anyhow::bail!(
+            "tcp:// plugin control is unsupported because it has no authenticated capability handshake"
+        );
+    }
     let startup = PluginStartupOptions::from_config(&entry.startup);
     let command = entry
         .command

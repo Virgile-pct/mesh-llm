@@ -20,6 +20,10 @@ use tokio::sync::Notify;
 
 mod logging_metrics;
 
+#[cfg(test)]
+#[path = "survey_exact_head_tests.rs"]
+mod survey_exact_head_tests;
+
 const DEFAULT_SERVICE_NAME: &str = "mesh-llm";
 const DEFAULT_EXPORT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_QUEUE_SIZE: usize = 2048;
@@ -54,7 +58,6 @@ const TELEMETRY_ATTRIBUTE_ALLOWLIST: &[&str] = &[
     "mesh_llm.logging_terminal_outcome",
     "mesh_llm.logging_webhook_attempt_state",
     "mesh_llm.logging_webhook_delivery_outcome",
-    "mesh_llm.model",
     "mesh_llm.quantization",
     "mesh_llm.request_outcome",
     "mesh_llm.route_attempt_bucket",
@@ -75,6 +78,7 @@ struct SurveyTelemetryInner {
     queue: Arc<SurveyEventQueue>,
     hardware: hardware::HardwareSurvey,
     source: SurveyTelemetrySource,
+    prompt_shape_metrics: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +145,7 @@ struct SurveySettings {
     headers: std::collections::HashMap<String, String>,
     export_interval: Duration,
     queue_size: usize,
+    prompt_shape_metrics: bool,
 }
 
 impl SurveySettings {
@@ -187,6 +192,7 @@ impl SurveySettings {
             headers,
             export_interval,
             queue_size,
+            prompt_shape_metrics: config.telemetry.prompt_shape_metrics,
         })
     }
 }
@@ -218,6 +224,7 @@ impl SurveyTelemetry {
                 queue,
                 hardware,
                 source,
+                prompt_shape_metrics: settings.prompt_shape_metrics,
             })),
         }
     }
@@ -405,6 +412,30 @@ impl RoutingTelemetrySink for SurveyTelemetry {
             ),
         });
     }
+
+    fn record_prompt_shape(
+        &self,
+        _model: Option<&str>,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        outcome: RequestOutcome,
+    ) {
+        if !self
+            .inner
+            .as_ref()
+            .is_some_and(|inner| inner.prompt_shape_metrics)
+        {
+            return;
+        }
+        if prompt_tokens.is_none() && completion_tokens.is_none() {
+            return;
+        }
+        self.emit(SurveyEvent::PromptShape {
+            attrs: PromptShapeAttributes::from_outcome(outcome),
+            prompt_tokens,
+            completion_tokens,
+        });
+    }
 }
 
 pub(super) fn classify_launch_failure(err: &anyhow::Error) -> SurveyFailureReason {
@@ -482,7 +513,6 @@ fn trimmed_nonempty(value: Option<&str>) -> Option<&str> {
 
 #[derive(Clone, Debug)]
 struct SurveyAttributes {
-    model: String,
     architecture: Option<String>,
     quantization: Option<String>,
     launch_kind: SurveyLaunchKind,
@@ -498,7 +528,6 @@ struct SurveyAttributes {
 impl SurveyAttributes {
     fn from_disabled_spec(spec: SurveyModelSpec<'_>) -> Self {
         Self {
-            model: model_metric_value(spec.model),
             architecture: None,
             quantization: None,
             launch_kind: spec.launch_kind,
@@ -549,7 +578,6 @@ impl SurveyAttributes {
             .and_then(|value| trimmed_nonempty(Some(value.as_str())).map(ToOwned::to_owned))
             .or_else(|| super::dashboard_quantization_from_model_name(spec.model));
         Self {
-            model: model_metric_value(spec.model),
             architecture,
             quantization,
             launch_kind: spec.launch_kind,
@@ -568,7 +596,6 @@ impl SurveyAttributes {
 
     fn key_values(&self, failure_reason: Option<SurveyFailureReason>) -> Vec<KeyValue> {
         let mut attrs = vec![
-            KeyValue::new("mesh_llm.model", self.model.clone()),
             KeyValue::new("mesh_llm.launch_kind", self.launch_kind.as_str()),
             KeyValue::new("mesh_llm.gpu_count", self.gpu_count as i64),
             KeyValue::new("mesh_llm.is_soc", self.is_soc),
@@ -604,19 +631,6 @@ impl SurveyAttributes {
         debug_assert_telemetry_attrs_allowlisted(&attrs);
         attrs
     }
-}
-
-fn model_metric_value(model: &str) -> String {
-    let path = Path::new(model);
-    if path.is_absolute() || (path.components().count() > 1 && path.extension().is_some()) {
-        return path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(model)
-            .to_string();
-    }
-    model.to_string()
 }
 
 fn redact_stable_id(stable_id: &str) -> Option<String> {
@@ -687,7 +701,6 @@ impl SurveyFailureReason {
 
 #[derive(Clone, Debug)]
 struct RequestAttributes {
-    model: Option<String>,
     source: SurveyTelemetrySource,
     route_service: &'static str,
     request_outcome: &'static str,
@@ -696,7 +709,7 @@ struct RequestAttributes {
 
 impl RequestAttributes {
     fn from_request(
-        model: Option<&str>,
+        _model: Option<&str>,
         attempts: usize,
         outcome: RequestOutcome,
         source: SurveyTelemetrySource,
@@ -707,7 +720,6 @@ impl RequestAttributes {
             RequestOutcome::Unavailable => ("unavailable", "unavailable"),
         };
         Self {
-            model: model.map(model_metric_value),
             source,
             route_service,
             request_outcome,
@@ -717,9 +729,6 @@ impl RequestAttributes {
 
     fn key_values(&self) -> Vec<KeyValue> {
         let mut attrs = self.source.key_values();
-        if let Some(model) = &self.model {
-            attrs.push(KeyValue::new("mesh_llm.model", model.clone()));
-        }
         attrs.push(KeyValue::new("mesh_llm.route_service", self.route_service));
         attrs.push(KeyValue::new(
             "mesh_llm.request_outcome",
@@ -735,8 +744,36 @@ impl RequestAttributes {
 }
 
 #[derive(Clone, Debug)]
+struct PromptShapeAttributes {
+    route_service: &'static str,
+    request_outcome: &'static str,
+}
+
+impl PromptShapeAttributes {
+    fn from_outcome(outcome: RequestOutcome) -> Self {
+        let (request_outcome, route_service) = match outcome {
+            RequestOutcome::Success(service) => ("success", request_service_label(service)),
+            RequestOutcome::Rejected(service) => ("rejected", request_service_label(service)),
+            RequestOutcome::Unavailable => ("unavailable", "unavailable"),
+        };
+        Self {
+            route_service,
+            request_outcome,
+        }
+    }
+
+    fn key_values(&self) -> Vec<KeyValue> {
+        let attrs = vec![
+            KeyValue::new("mesh_llm.route_service", self.route_service),
+            KeyValue::new("mesh_llm.request_outcome", self.request_outcome),
+        ];
+        debug_assert_telemetry_attrs_allowlisted(&attrs);
+        attrs
+    }
+}
+
+#[derive(Clone, Debug)]
 struct RouteAttemptAttributes {
-    model: Option<String>,
     source: SurveyTelemetrySource,
     target_kind: &'static str,
     target_node_id: Option<String>,
@@ -745,7 +782,7 @@ struct RouteAttemptAttributes {
 
 impl RouteAttemptAttributes {
     fn from_attempt(
-        model: Option<&str>,
+        _model: Option<&str>,
         target: &AttemptTarget,
         outcome: AttemptOutcome,
         source: SurveyTelemetrySource,
@@ -756,7 +793,6 @@ impl RouteAttemptAttributes {
             AttemptTarget::Endpoint(_) => ("endpoint", None),
         };
         Self {
-            model: model.map(model_metric_value),
             source,
             target_kind,
             target_node_id,
@@ -766,9 +802,6 @@ impl RouteAttemptAttributes {
 
     fn key_values(&self) -> Vec<KeyValue> {
         let mut attrs = self.source.key_values();
-        if let Some(model) = &self.model {
-            attrs.push(KeyValue::new("mesh_llm.model", model.clone()));
-        }
         attrs.push(KeyValue::new("mesh_llm.target_kind", self.target_kind));
         if let Some(node_id) = &self.target_node_id {
             attrs.push(KeyValue::new("mesh_llm.target_node_id", node_id.clone()));
@@ -935,6 +968,11 @@ enum SurveyEvent {
     RouteAttempt {
         attrs: RouteAttemptAttributes,
     },
+    PromptShape {
+        attrs: PromptShapeAttributes,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+    },
     GuardrailDecision {
         attrs: GuardrailDecisionAttributes,
     },
@@ -1019,6 +1057,8 @@ struct SurveyRecorder {
     model_context_length: Gauge<u64>,
     model_request_total: Counter<u64>,
     route_attempt_total: Counter<u64>,
+    prompt_tokens: Histogram<u64>,
+    completion_tokens: Histogram<u64>,
     guardrail_decision_total: Counter<u64>,
     guardrail_outcome_total: Counter<u64>,
     requests_inflight: Gauge<u64>,
@@ -1110,6 +1150,16 @@ impl SurveyRecorder {
                 .with_description(
                     "Routing attempts from this node to local, remote, or endpoint targets.",
                 )
+                .build(),
+            prompt_tokens: meter
+                .u64_histogram("mesh_llm_prompt_tokens")
+                .with_description("Observed prompt token count for completed requests.")
+                .with_unit("{token}")
+                .build(),
+            completion_tokens: meter
+                .u64_histogram("mesh_llm_completion_tokens")
+                .with_description("Observed completion token count for completed requests.")
+                .with_unit("{token}")
                 .build(),
             guardrail_decision_total: meter
                 .u64_counter("mesh_llm_guardrail_decision_total")
@@ -1244,6 +1294,19 @@ impl SurveyRecorder {
                 let kv = attrs.key_values();
                 self.route_attempt_total.add(1, &kv);
             }
+            SurveyEvent::PromptShape {
+                attrs,
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                let kv = attrs.key_values();
+                if let Some(tokens) = prompt_tokens {
+                    self.prompt_tokens.record(tokens, &kv);
+                }
+                if let Some(tokens) = completion_tokens {
+                    self.completion_tokens.record(tokens, &kv);
+                }
+            }
             SurveyEvent::GuardrailDecision { attrs } => {
                 let kv = attrs.key_values();
                 self.guardrail_decision_total.add(1, &kv);
@@ -1267,10 +1330,6 @@ fn service_version_attrs() -> Vec<KeyValue> {
 }
 
 #[cfg(test)]
-#[path = "survey_exact_head_tests.rs"]
-mod survey_exact_head_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugin::{MeshConfig, TelemetryConfig, TelemetryMetricsConfig};
@@ -1290,6 +1349,172 @@ mod tests {
                 telemetry_attribute_allowed(&key),
                 "unexpected telemetry attribute key: {key}"
             );
+        }
+    }
+
+    fn prompt_shape_telemetry(enabled: bool) -> (SurveyTelemetry, Arc<SurveyEventQueue>) {
+        let queue = Arc::new(SurveyEventQueue::new(4));
+        (
+            SurveyTelemetry {
+                inner: Some(Arc::new(SurveyTelemetryInner {
+                    queue: queue.clone(),
+                    hardware: hardware::HardwareSurvey::default(),
+                    source: test_source(),
+                    prompt_shape_metrics: enabled,
+                })),
+            },
+            queue,
+        )
+    }
+
+    #[test]
+    fn prompt_shape_metrics_emit_only_reviewed_counts_when_enabled() {
+        let (telemetry, queue) = prompt_shape_telemetry(true);
+
+        telemetry.record_prompt_shape(
+            Some("/private/models/model.gguf"),
+            Some(21),
+            Some(8),
+            RequestOutcome::Success(RequestService::Remote),
+        );
+
+        let events = queue.drain();
+        assert_eq!(events.len(), 1);
+        let SurveyEvent::PromptShape {
+            attrs,
+            prompt_tokens,
+            completion_tokens,
+        } = &events[0]
+        else {
+            panic!("expected prompt shape event");
+        };
+        assert_eq!(*prompt_tokens, Some(21));
+        assert_eq!(*completion_tokens, Some(8));
+        let exported = format!("{:?}", attrs.key_values());
+        assert!(!exported.contains("model.gguf"));
+        assert!(!exported.contains("source_node"));
+        assert!(exported.contains("remote"));
+        assert!(exported.contains("success"));
+    }
+
+    #[test]
+    fn prompt_shape_metrics_do_not_emit_when_disabled() {
+        let (telemetry, queue) = prompt_shape_telemetry(false);
+
+        telemetry.record_prompt_shape(
+            Some("model"),
+            Some(21),
+            Some(8),
+            RequestOutcome::Success(RequestService::Local),
+        );
+
+        assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn model_values_are_absent_from_request_and_route_attributes() {
+        let request = RequestAttributes::from_request(
+            Some("https://user:secret@example.test/private/model.gguf?token=leaked"),
+            1,
+            RequestOutcome::Success(RequestService::Local),
+            test_source(),
+        );
+        let route = RouteAttemptAttributes::from_attempt(
+            Some("org/private-model:variant"),
+            &AttemptTarget::Local("local".into()),
+            AttemptOutcome::Success,
+            test_source(),
+        );
+
+        for attrs in [request.key_values(), route.key_values()] {
+            assert!(
+                attrs
+                    .iter()
+                    .all(|attr| attr.key.as_str() != "mesh_llm.model")
+            );
+            let serialized = format!("{attrs:?}");
+            assert!(!serialized.contains("secret"));
+            assert!(!serialized.contains("private-model"));
+        }
+    }
+
+    #[test]
+    fn prompt_shape_histograms_reach_exporter_with_reviewed_attributes() {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader};
+
+        let mut config = survey_config();
+        config.telemetry.prompt_shape_metrics = true;
+        let settings = SurveySettings::from_config_with_env(&config, |_| None).expect("settings");
+        let queue = Arc::new(SurveyEventQueue::new(settings.queue_size));
+        let telemetry = SurveyTelemetry {
+            inner: Some(Arc::new(SurveyTelemetryInner {
+                queue: queue.clone(),
+                hardware: hardware::HardwareSurvey::default(),
+                source: test_source(),
+                prompt_shape_metrics: settings.prompt_shape_metrics,
+            })),
+        };
+        let routing_sink: &dyn RoutingTelemetrySink = &telemetry;
+        routing_sink.record_prompt_shape(
+            Some("https://user:secret@example.test/private/model.gguf?token=leaked"),
+            Some(21),
+            Some(8),
+            RequestOutcome::Success(RequestService::Endpoint),
+        );
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let mut recorder = SurveyRecorder::new(provider);
+        for event in queue.drain() {
+            recorder.record(event);
+        }
+        recorder._provider.force_flush().expect("metric flush");
+
+        let exported = exporter.get_finished_metrics().expect("exported metrics");
+        let mut observed = BTreeMap::new();
+        for metric in exported
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+        {
+            let AggregatedMetrics::U64(MetricData::Histogram(histogram)) = metric.data() else {
+                continue;
+            };
+            let Some(point) = histogram.data_points().next() else {
+                continue;
+            };
+            observed.insert(
+                metric.name().to_string(),
+                (
+                    point.sum(),
+                    point
+                        .attributes()
+                        .map(|attr| (attr.key.to_string(), attr.value.to_string()))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            );
+        }
+
+        assert_eq!(observed["mesh_llm_prompt_tokens"].0, 21);
+        assert_eq!(observed["mesh_llm_completion_tokens"].0, 8);
+        for (_, attrs) in observed.values() {
+            assert_eq!(attrs.len(), 2);
+            assert_eq!(
+                attrs.get("mesh_llm.route_service").map(String::as_str),
+                Some("endpoint")
+            );
+            assert_eq!(
+                attrs.get("mesh_llm.request_outcome").map(String::as_str),
+                Some("success")
+            );
+            let serialized = format!("{attrs:?}");
+            assert!(!serialized.contains("secret"));
+            assert!(!serialized.contains("example.test"));
+            assert!(!serialized.contains("token=leaked"));
+            assert!(!serialized.contains("/private"));
         }
     }
 
@@ -1348,7 +1573,12 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
                 .await
                 .expect("OTLP response");
-            request
+            let body_start = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("OTLP request headers")
+                + 4;
+            request.split_off(body_start)
         });
 
         let mut config = survey_config();
@@ -1479,9 +1709,8 @@ mod tests {
     #[test]
     fn event_queue_drops_oldest_when_full() {
         let queue = SurveyEventQueue::new(2);
-        for model in ["first", "second", "third"] {
+        for context_length in [1, 2, 3] {
             let attrs = SurveyAttributes {
-                model: model.into(),
                 architecture: None,
                 quantization: None,
                 launch_kind: SurveyLaunchKind::Startup,
@@ -1491,7 +1720,7 @@ mod tests {
                 gpu_count: 0,
                 is_soc: false,
                 backend: None,
-                context_length: None,
+                context_length: Some(context_length),
             };
             queue.push(SurveyEvent::LaunchSuccess {
                 attrs,
@@ -1500,14 +1729,14 @@ mod tests {
         }
 
         let drained = queue.drain();
-        let models: Vec<_> = drained
+        let context_lengths: Vec<_> = drained
             .iter()
             .filter_map(|event| match event {
-                SurveyEvent::LaunchSuccess { attrs, .. } => Some(attrs.model.as_str()),
+                SurveyEvent::LaunchSuccess { attrs, .. } => attrs.context_length,
                 _ => None,
             })
             .collect();
-        assert_eq!(models, vec!["second", "third"]);
+        assert_eq!(context_lengths, vec![2, 3]);
     }
 
     #[test]
@@ -1541,10 +1770,7 @@ mod tests {
             .map(|kv| (kv.key.to_string(), kv.value.to_string()))
             .collect();
 
-        assert_eq!(
-            kv.get("mesh_llm.model").map(String::as_str),
-            Some("Qwen3-8B-Q4_K_M.gguf")
-        );
+        assert!(!kv.contains_key("mesh_llm.model"));
         assert_eq!(
             kv.get("mesh_llm.context_bucket").map(String::as_str),
             Some("16k_32k")
@@ -1594,7 +1820,6 @@ mod tests {
                 "mesh_llm.logging_terminal_outcome",
                 "mesh_llm.logging_webhook_attempt_state",
                 "mesh_llm.logging_webhook_delivery_outcome",
-                "mesh_llm.model",
                 "mesh_llm.quantization",
                 "mesh_llm.request_outcome",
                 "mesh_llm.route_attempt_bucket",
@@ -1611,7 +1836,6 @@ mod tests {
     #[test]
     fn generated_telemetry_attributes_are_allowlisted() {
         let lifecycle_attrs = SurveyAttributes {
-            model: "Qwen3-8B-Q4_K_M.gguf".into(),
             architecture: Some("qwen3".into()),
             quantization: Some("Q4_K_M".into()),
             launch_kind: SurveyLaunchKind::Startup,
@@ -1722,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn request_attributes_capture_model_service_and_attempt_count() {
+    fn request_attributes_omit_model_and_capture_service_and_attempt_count() {
         let attrs = RequestAttributes::from_request(
             Some("/private/models/Qwen3-8B-Q4_K_M.gguf"),
             2,
@@ -1735,10 +1959,7 @@ mod tests {
             .map(|kv| (kv.key.to_string(), kv.value.to_string()))
             .collect();
 
-        assert_eq!(
-            kv.get("mesh_llm.model").map(String::as_str),
-            Some("Qwen3-8B-Q4_K_M.gguf")
-        );
+        assert!(!kv.contains_key("mesh_llm.model"));
         assert_eq!(
             kv.get("mesh_llm.route_service").map(String::as_str),
             Some("remote")
@@ -1782,10 +2003,7 @@ mod tests {
             .map(|kv| (kv.key.to_string(), kv.value.to_string()))
             .collect();
 
-        assert_eq!(
-            kv.get("mesh_llm.model").map(String::as_str),
-            Some("Qwen/Qwen3-8B-GGUF:Q4_K_M")
-        );
+        assert!(!kv.contains_key("mesh_llm.model"));
         assert_eq!(
             kv.get("mesh_llm.target_kind").map(String::as_str),
             Some("remote")
@@ -1825,19 +2043,23 @@ mod tests {
     }
 
     #[test]
-    fn model_metric_keeps_huggingface_refs_but_strips_absolute_paths() {
-        assert_eq!(
-            model_metric_value("Qwen/Qwen3-8B-GGUF:Q4_K_M"),
-            "Qwen/Qwen3-8B-GGUF:Q4_K_M"
+    fn lifecycle_attributes_omit_model_values() {
+        let attrs = SurveyAttributes::from_disabled_spec(SurveyModelSpec {
+            model: "org/private-model:variant",
+            model_path: None,
+            launch_kind: SurveyLaunchKind::Startup,
+            pinned_gpu: None,
+            backend: None,
+            context_length: None,
+        })
+        .key_values(None);
+
+        assert!(
+            attrs
+                .iter()
+                .all(|attr| attr.key.as_str() != "mesh_llm.model")
         );
-        assert_eq!(
-            model_metric_value("/private/models/Qwen3-8B-Q4_K_M.gguf"),
-            "Qwen3-8B-Q4_K_M.gguf"
-        );
-        assert_eq!(
-            model_metric_value("models/Qwen3-8B-Q4_K_M.gguf"),
-            "Qwen3-8B-Q4_K_M.gguf"
-        );
+        assert!(!format!("{attrs:?}").contains("private-model"));
     }
 
     #[test]

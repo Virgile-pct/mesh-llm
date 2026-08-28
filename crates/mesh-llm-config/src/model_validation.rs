@@ -23,14 +23,15 @@ use crate::validation_support::{
 
 pub(crate) fn validate_duplicate_model_entries(
     models: &[ModelConfigEntry],
+    defaults: Option<&ModelConfigDefaults>,
     diagnostics: &mut Vec<ConfigDiagnostic>,
 ) {
     for i in 0..models.len() {
         for j in (i + 1)..models.len() {
-            if models[i].model == models[j].model
-                && models[i].derived_profile() == models[j].derived_profile()
-            {
-                let profile_i = models[i].derived_profile();
+            let first_profile = effective_model_profile(&models[i], defaults);
+            let second_profile = effective_model_profile(&models[j], defaults);
+            if models[i].model == models[j].model && first_profile == second_profile {
+                let profile_i = first_profile.clone();
                 let profile_clause = if profile_i.is_empty() {
                     " and default profile".to_string()
                 } else {
@@ -44,8 +45,53 @@ pub(crate) fn validate_duplicate_model_entries(
                     ),
                 ));
             }
+
+            let first_name = effective_served_model_name(&models[i], defaults);
+            let second_name = effective_served_model_name(&models[j], defaults);
+            if first_name == second_name
+                && !(models[i].model == models[j].model && first_profile == second_profile)
+            {
+                diagnostics.push(validation_diagnostic(
+                    "models",
+                    format!(
+                        "duplicate served model identity: models[{i}] and models[{j}] both resolve to {first_name:?}"
+                    ),
+                ));
+            }
         }
     }
+}
+
+fn effective_served_model_name(
+    model: &ModelConfigEntry,
+    defaults: Option<&ModelConfigDefaults>,
+) -> String {
+    let base_name = model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.server.as_ref())
+        .and_then(|server| server.alias.as_deref())
+        .or_else(|| {
+            defaults
+                .and_then(|value| value.advanced.as_ref())
+                .and_then(|advanced| advanced.server.as_ref())
+                .and_then(|server| server.alias.as_deref())
+        })
+        .unwrap_or(&model.model)
+        .trim();
+    let profile = effective_model_profile(model, defaults);
+    if profile.is_empty() {
+        base_name.to_string()
+    } else {
+        format!("{base_name}#{profile}")
+    }
+}
+
+fn effective_model_profile(
+    model: &ModelConfigEntry,
+    defaults: Option<&ModelConfigDefaults>,
+) -> String {
+    model.with_profile_defaults(defaults).derived_profile()
 }
 
 pub(crate) fn collect_legacy_draft_model_path_warnings(
@@ -1346,13 +1392,38 @@ model = "my-model"
     }
 
     #[test]
+    fn load_behavior_changes_produce_distinct_effective_profiles() {
+        let config: MeshConfig = toml::from_str(
+            r#"
+[defaults.hardware]
+repack = true
+
+[[models]]
+model = "same-model"
+
+[[models]]
+model = "same-model"
+[models.hardware]
+repack = false
+"#,
+        )
+        .expect("config parses");
+
+        let diagnostics = validate_config_diagnostics(&config);
+        let text = legacy_validation_error_text(&diagnostics);
+
+        assert!(
+            !text.contains("duplicate model entry"),
+            "different effective load behavior must create distinct profiles: {text}"
+        );
+    }
+
+    #[test]
     fn duplicate_explicit_served_aliases_are_rejected() {
         let config: MeshConfig = toml::from_str(
             r#"
 [[models]]
 model = "canonical/first"
-[models.model_fit]
-ctx_size = 8192
 [models.advanced.server]
 alias = "public-model"
 

@@ -232,6 +232,7 @@ pub(super) fn stage_load_to_proto(
         cache_type_k: load.cache_type_k,
         cache_type_v: load.cache_type_v,
         flash_attn_type: stage_flash_attn_type_to_proto(load.flash_attn_type) as i32,
+        runtime_settings: Some(stage_runtime_settings_to_proto(load.runtime_settings)),
         native_mtp_enabled: Some(load.native_mtp_enabled),
         shutdown_generation: load.shutdown_generation,
         coordinator_term: load.coordinator_term,
@@ -250,6 +251,30 @@ pub(super) fn stage_load_to_proto(
         },
         upstream: load.upstream.map(stage_peer_to_proto),
         downstream: load.downstream.map(stage_peer_to_proto),
+    }
+}
+
+fn stage_runtime_settings_to_proto(
+    settings: crate::inference::skippy::StageLoadRuntimeSettings,
+) -> skippy_stage_proto::StageLoadRuntimeSettings {
+    skippy_stage_proto::StageLoadRuntimeSettings {
+        repack: Some(settings.repack),
+        op_offload: settings.op_offload,
+        no_host_buffer: Some(settings.no_host_buffer),
+        check_tensors: Some(settings.check_tensors),
+        direct_io: Some(settings.direct_io),
+        main_gpu: settings.main_gpu,
+        split_mode: Some(match settings.split_mode {
+            skippy_protocol::SplitMode::Auto => -1,
+            skippy_protocol::SplitMode::None => 0,
+            skippy_protocol::SplitMode::Layer => 1,
+            skippy_protocol::SplitMode::Row => 2,
+            skippy_protocol::SplitMode::Tensor => 3,
+        }),
+        kv_offload: settings.kv_offload,
+        kv_unified: settings.kv_unified,
+        swa_full: settings.swa_full,
+        cache_idle_slots: settings.cache_idle_slots,
     }
 }
 
@@ -417,6 +442,7 @@ pub(super) fn stage_load_from_proto(
         cache_type_k: load.cache_type_k,
         cache_type_v: load.cache_type_v,
         flash_attn_type: stage_flash_attn_type_from_proto(load.flash_attn_type),
+        runtime_settings: stage_runtime_settings_from_proto(load.runtime_settings),
         native_mtp_enabled: load.native_mtp_enabled.unwrap_or(true),
         shutdown_generation: load.shutdown_generation,
         coordinator_term: load.coordinator_term,
@@ -430,6 +456,33 @@ pub(super) fn stage_load_from_proto(
         upstream: load.upstream.map(stage_peer_from_proto).transpose()?,
         downstream: load.downstream.map(stage_peer_from_proto).transpose()?,
     })
+}
+
+fn stage_runtime_settings_from_proto(
+    settings: Option<skippy_stage_proto::StageLoadRuntimeSettings>,
+) -> crate::inference::skippy::StageLoadRuntimeSettings {
+    let Some(settings) = settings else {
+        return crate::inference::skippy::StageLoadRuntimeSettings::default();
+    };
+    crate::inference::skippy::StageLoadRuntimeSettings {
+        repack: settings.repack.unwrap_or(false),
+        op_offload: settings.op_offload,
+        no_host_buffer: settings.no_host_buffer.unwrap_or(false),
+        check_tensors: settings.check_tensors.unwrap_or(false),
+        direct_io: settings.direct_io.unwrap_or(false),
+        main_gpu: settings.main_gpu,
+        split_mode: match settings.split_mode.unwrap_or(-1) {
+            0 => skippy_protocol::SplitMode::None,
+            1 => skippy_protocol::SplitMode::Layer,
+            2 => skippy_protocol::SplitMode::Row,
+            3 => skippy_protocol::SplitMode::Tensor,
+            _ => skippy_protocol::SplitMode::Auto,
+        },
+        kv_offload: settings.kv_offload,
+        kv_unified: settings.kv_unified,
+        swa_full: settings.swa_full,
+        cache_idle_slots: settings.cache_idle_slots,
+    }
 }
 
 pub(super) fn stage_coordinator_claim_from_proto(
@@ -1353,5 +1406,9 @@ mod tests {
             .expect("runtime settings must survive production round trip");
 
         assert_eq!(observed, settings);
+        assert_eq!(
+            stage_runtime_settings_from_proto(None),
+            crate::inference::skippy::StageLoadRuntimeSettings::default()
+        );
     }
 }

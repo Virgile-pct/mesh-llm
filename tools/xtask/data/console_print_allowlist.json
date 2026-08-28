@@ -4359,27 +4359,27 @@
   ],
   "crates/skippy-server/src/runtime_state.rs": [
     {
-      "line": 666,
+      "line": 667,
       "macro_name": "eprintln!"
     },
     {
-      "line": 758,
+      "line": 759,
       "macro_name": "eprintln!"
     },
     {
-      "line": 800,
+      "line": 801,
       "macro_name": "eprintln!"
     },
     {
-      "line": 837,
+      "line": 838,
       "macro_name": "eprintln!"
     },
     {
-      "line": 841,
+      "line": 842,
       "macro_name": "eprintln!"
     },
     {
-      "line": 846,
+      "line": 847,
       "macro_name": "eprintln!"
     }
   ],

@@ -342,6 +342,7 @@ fn runtime_config_from_stage_config(
             SplitMode::None => RuntimeSplitMode::None,
             SplitMode::Layer => RuntimeSplitMode::Layer,
             SplitMode::Row => RuntimeSplitMode::Row,
+            SplitMode::Tensor => RuntimeSplitMode::Tensor,
         },
         selected_backend_device: config
             .selected_device
@@ -969,8 +970,6 @@ mod tests {
             "batch_max_tokens": 384,
             "glm_dsa_policy": "v1",
             "generation_signal_window": 20,
-            "use_mmap_prefetch": true,
-            "use_mmap_buffer": true,
             "stage_id": "stage-0",
             "stage_index": 0,
             "layer_start": 0,
@@ -997,8 +996,6 @@ mod tests {
         assert!(debug.contains("image_max_tokens: Some(1536)"));
         assert!(debug.contains("batch_max_tokens: Some(384)"));
         assert!(debug.contains("glm_dsa_policy: V1"));
-        assert!(debug.contains("use_mmap_prefetch: true"));
-        assert!(debug.contains("use_mmap_buffer: true"));
     }
 
     #[test]

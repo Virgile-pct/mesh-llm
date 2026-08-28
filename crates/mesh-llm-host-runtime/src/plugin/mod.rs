@@ -145,7 +145,7 @@ impl PluginManager {
             rpc_bridge.clone(),
             &runtime_data,
         )
-        .await;
+        .await?;
         let manager = Self {
             inner: Arc::new(PluginManagerInner {
                 plugins,
@@ -231,7 +231,7 @@ impl PluginManager {
         instance_id: String,
         rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
         runtime_data: &RuntimeDataCollector,
-    ) -> (BTreeMap<String, ExternalPlugin>, Vec<PluginSummary>) {
+    ) -> Result<(BTreeMap<String, ExternalPlugin>, Vec<PluginSummary>)> {
         let mut plugins = BTreeMap::new();
         let mut failed = Vec::new();
         for spec in &specs.externals {
@@ -249,11 +249,20 @@ impl PluginManager {
                     plugins.insert(spec.name.clone(), plugin);
                 }
                 Err(error) => {
-                    failed.push(Self::plugin_load_failure_summary(spec, &error));
+                    if spec.startup.optional {
+                        failed.push(Self::plugin_load_failure_summary(spec, &error));
+                    } else {
+                        for plugin in plugins.values() {
+                            plugin.shutdown().await;
+                        }
+                        return Err(error).with_context(|| {
+                            format!("Required plugin '{}' failed to start", spec.name)
+                        });
+                    }
                 }
             }
         }
-        (plugins, failed)
+        Ok((plugins, failed))
     }
 
     async fn load_external_plugin(
@@ -303,12 +312,12 @@ impl PluginManager {
         spec: &ExternalPluginSpec,
         error: &anyhow::Error,
     ) -> PluginSummary {
-        let error_message = error.to_string();
+        let error_message = crate::logging::policy::redact_urls_in_text(&error.to_string());
         tracing::warn!(
             plugin = %spec.name,
             command = %spec.command,
             args = %format_args_for_log(&spec.args),
-            error = %error,
+            error = %error_message,
             "Plugin disabled after load failure"
         );
         PluginSummary {
@@ -319,7 +328,7 @@ impl PluginManager {
             pid: None,
             version: None,
             capabilities: Vec::new(),
-            command: Some(spec.command.clone()),
+            command: (!spec.command.is_empty()).then(|| spec.command.clone()),
             args: spec.args.clone(),
             tools: Vec::new(),
             manifest: None,
@@ -1613,29 +1622,19 @@ mod tests {
 
     #[test]
     fn failed_plugin_summary_redacts_urls_before_serialization() {
-        let config = MeshConfig {
-            plugins: vec![PluginConfigEntry {
-                name: "remote".into(),
-                enabled: Some(true),
-                web_ui_enabled: None,
-                command: None,
-                args: Vec::new(),
-                url: Some("tcp://127.0.0.1:19091".into()),
-                settings: Default::default(),
-                startup: PluginStartupConfig {
-                    optional: true,
-                    ..PluginStartupConfig::default()
-                },
-            }],
-            defaults: None,
-            ..MeshConfig::default()
+        let spec = ExternalPluginSpec {
+            name: "remote".into(),
+            command: "mesh-llm-plugin-remote".into(),
+            args: Vec::new(),
+            url: Some("https://plugin.example.test/v1".into()),
+            env: BTreeMap::new(),
+            startup: PluginStartupOptions {
+                optional: true,
+                ..PluginStartupOptions::default()
+            },
+            web_ui_enabled: None,
+            installed_metadata: None,
         };
-        let spec = resolve_plugins(&config, private_host_mode())
-            .expect("plugin config resolves")
-            .externals
-            .into_iter()
-            .find(|spec| spec.name == "remote")
-            .expect("remote spec");
         let error = anyhow::anyhow!(
             "connection to tcp://user:secret@127.0.0.1:19091/control?token=private failed"
         );
@@ -1745,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_plugin_control_url_does_not_require_a_local_command() {
+    fn remote_plugin_control_url_is_rejected_without_authentication() {
         let config = MeshConfig {
             plugins: vec![PluginConfigEntry {
                 name: "remote-plugin".into(),
@@ -1761,16 +1760,13 @@ mod tests {
             ..MeshConfig::default()
         };
 
-        let resolved = resolve_plugins(&config, private_host_mode())
-            .expect("remote control URL should replace a local command");
-        let spec = resolved
-            .externals
-            .iter()
-            .find(|spec| spec.name == "remote-plugin")
-            .expect("remote plugin should resolve");
-
-        assert!(spec.command.is_empty());
-        assert_eq!(spec.url.as_deref(), Some("tcp://127.0.0.1:19091"));
+        let error = resolve_plugins(&config, private_host_mode())
+            .expect_err("unauthenticated remote plugin control must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated capability handshake")
+        );
     }
 
     #[test]
@@ -1881,7 +1877,89 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("broken"));
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("broken"), "{error_text}");
+    }
+
+    #[tokio::test]
+    async fn required_plugin_failure_rolls_back_plugins_loaded_earlier() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("plugin listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("plugin connection");
+            let mut stream = transport::LocalStream::Tcp(stream);
+            let request = transport::read_envelope(&mut stream)
+                .await
+                .expect("initialize request");
+            transport::write_envelope(
+                &mut stream,
+                &proto::Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    plugin_id: "first".into(),
+                    request_id: request.request_id,
+                    payload: Some(proto::envelope::Payload::InitializeResponse(
+                        proto::InitializeResponse {
+                            plugin_id: "first".into(),
+                            plugin_protocol_version: PROTOCOL_VERSION,
+                            plugin_version: "v1.0.0".into(),
+                            server_info_json: serde_json::to_string(&ServerInfo::default())
+                                .expect("server info"),
+                            capabilities: Vec::new(),
+                            manifest: None,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("initialize response");
+            let mut byte = [0_u8; 1];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
+                    .await
+                    .expect("rollback should close the control connection")
+                    .unwrap_or(0);
+            assert_eq!(read, 0, "rollback must disconnect the loaded plugin");
+        });
+        let specs = ResolvedPlugins {
+            externals: vec![
+                ExternalPluginSpec {
+                    name: "first".into(),
+                    command: String::new(),
+                    args: Vec::new(),
+                    url: Some(format!("test+tcp://{address}")),
+                    env: BTreeMap::new(),
+                    startup: PluginStartupOptions::default(),
+                    web_ui_enabled: None,
+                    installed_metadata: None,
+                },
+                ExternalPluginSpec {
+                    name: "broken".into(),
+                    command: "mesh-llm-definitely-missing-plugin-binary".into(),
+                    args: Vec::new(),
+                    url: None,
+                    env: BTreeMap::new(),
+                    startup: PluginStartupOptions::default(),
+                    web_ui_enabled: None,
+                    installed_metadata: None,
+                },
+            ],
+            inactive: Vec::new(),
+        };
+        let (mesh_tx, _mesh_rx) = mpsc::channel(1);
+
+        let error = match PluginManager::start(&specs, private_host_mode(), mesh_tx).await {
+            Ok(manager) => {
+                manager.shutdown().await;
+                panic!("required plugin failure must stop manager startup");
+            }
+            Err(error) => error,
+        };
+
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("broken"), "{error_text}");
+        server.await.expect("plugin server task");
     }
 
     #[tokio::test]
@@ -1924,6 +2002,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_connect_failures_honor_required_and_optional_policy() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve address");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+        let remote_spec = |name: &str, optional| ExternalPluginSpec {
+            name: name.into(),
+            command: String::new(),
+            args: Vec::new(),
+            url: Some(format!("tcp://{address}")),
+            env: BTreeMap::new(),
+            startup: PluginStartupOptions {
+                optional,
+                ..PluginStartupOptions::default()
+            },
+            web_ui_enabled: None,
+            installed_metadata: None,
+        };
+
+        let (required_tx, _required_rx) = mpsc::channel(1);
+        let required = ResolvedPlugins {
+            externals: vec![remote_spec("required-remote", false)],
+            inactive: Vec::new(),
+        };
+        let required_error =
+            match PluginManager::start(&required, private_host_mode(), required_tx).await {
+                Ok(manager) => {
+                    manager.shutdown().await;
+                    panic!("required connection failure must stop startup");
+                }
+                Err(error) => error,
+            };
+        assert!(required_error.to_string().contains("required-remote"));
+
+        let (optional_tx, _optional_rx) = mpsc::channel(1);
+        let optional = ResolvedPlugins {
+            externals: vec![remote_spec("optional-remote", true)],
+            inactive: Vec::new(),
+        };
+        let manager = PluginManager::start(&optional, private_host_mode(), optional_tx)
+            .await
+            .expect("optional connection failure should not stop startup");
+        let summaries = manager.list().await;
+        manager.shutdown().await;
+        assert_eq!(summaries[0].name, "optional-remote");
+        assert_eq!(summaries[0].status, "error");
+    }
+
+    #[tokio::test]
     async fn plugin_load_failure_keeps_declared_web_ui_metadata() {
         let specs = ResolvedPlugins {
             externals: vec![ExternalPluginSpec {
@@ -1932,7 +2058,10 @@ mod tests {
                 args: Vec::new(),
                 url: None,
                 env: BTreeMap::new(),
-                startup: PluginStartupOptions::default(),
+                startup: PluginStartupOptions {
+                    optional: true,
+                    ..PluginStartupOptions::default()
+                },
                 web_ui_enabled: None,
                 installed_metadata: Some(installed_metadata_with_web_ui(
                     InstalledPluginWebUiValidationStatus::Valid,

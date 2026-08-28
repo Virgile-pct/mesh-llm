@@ -1,5 +1,5 @@
 use anyhow::Result;
-use skippy_protocol::{FlashAttentionType, LoadMode, StageDevice};
+use skippy_protocol::{FlashAttentionType, LoadMode, SplitMode, StageDevice};
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -77,6 +77,7 @@ pub(crate) struct StageLoadRequest {
     pub(crate) cache_type_k: String,
     pub(crate) cache_type_v: String,
     pub(crate) flash_attn_type: FlashAttentionType,
+    pub(crate) runtime_settings: StageLoadRuntimeSettings,
     pub(crate) native_mtp_enabled: bool,
     pub(crate) shutdown_generation: u64,
     pub(crate) coordinator_term: u64,
@@ -85,6 +86,21 @@ pub(crate) struct StageLoadRequest {
     pub(crate) load_mode: LoadMode,
     pub(crate) upstream: Option<StagePeerDescriptor>,
     pub(crate) downstream: Option<StagePeerDescriptor>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StageLoadRuntimeSettings {
+    pub(crate) repack: bool,
+    pub(crate) op_offload: Option<bool>,
+    pub(crate) no_host_buffer: bool,
+    pub(crate) check_tensors: bool,
+    pub(crate) direct_io: bool,
+    pub(crate) main_gpu: Option<u32>,
+    pub(crate) split_mode: SplitMode,
+    pub(crate) kv_offload: Option<bool>,
+    pub(crate) kv_unified: Option<bool>,
+    pub(crate) swa_full: Option<bool>,
+    pub(crate) cache_idle_slots: Option<u32>,
 }
 
 #[derive(Clone, Debug)]

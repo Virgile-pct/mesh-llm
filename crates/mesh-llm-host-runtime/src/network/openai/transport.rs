@@ -848,6 +848,18 @@ fn handle_mesh_attempt_result(
 ) -> MeshAttemptDisposition {
     match attempt_result {
         RouteAttemptResult::Delivered { status_code, usage } => {
+            let outcome = request_outcome_for_status(
+                status_code,
+                crate::network::metrics::RequestService::Remote,
+            );
+            if let Some(usage) = usage.as_ref() {
+                context.node.record_prompt_shape(
+                    context.effective_model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    outcome,
+                );
+            }
             handle_delivered_mesh_attempt(context, status_code);
             MeshAttemptDisposition::Return(RouteAttemptResult::Delivered { status_code, usage })
         }
@@ -1454,7 +1466,16 @@ pub async fn route_to_target(
     match result {
         RouteAttemptResult::Delivered { status_code, usage } => {
             let service = request_service_for_target(&target);
-            node.record_routed_request(model, 1, request_outcome_for_status(status_code, service));
+            let outcome = request_outcome_for_status(status_code, service);
+            if let Some(usage) = usage.as_ref() {
+                node.record_prompt_shape(
+                    model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    outcome,
+                );
+            }
+            node.record_routed_request(model, 1, outcome);
             usage.map_or(RouteDispatchOutcome::Responded(status_code), |usage| {
                 RouteDispatchOutcome::RespondedWithUsage { status_code, usage }
             })
@@ -1541,14 +1562,19 @@ pub async fn route_http_endpoint_request(
     );
     match result {
         RouteAttemptResult::Delivered { status_code, usage } => {
-            node.record_routed_request(
-                model,
-                1,
-                request_outcome_for_status(
-                    status_code,
-                    crate::network::metrics::RequestService::Endpoint,
-                ),
+            let outcome = request_outcome_for_status(
+                status_code,
+                crate::network::metrics::RequestService::Endpoint,
             );
+            if let Some(usage) = usage.as_ref() {
+                node.record_prompt_shape(
+                    model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    outcome,
+                );
+            }
+            node.record_routed_request(model, 1, outcome);
             usage.map_or(RouteDispatchOutcome::Responded(status_code), |usage| {
                 RouteDispatchOutcome::RespondedWithUsage { status_code, usage }
             })

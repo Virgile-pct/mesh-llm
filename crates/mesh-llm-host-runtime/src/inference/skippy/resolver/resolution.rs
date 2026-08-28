@@ -137,7 +137,18 @@ impl<'a> ResolverContext<'a> {
         let model_entry = mesh_config
             .models
             .iter()
-            .find(|entry| entry.model == request.model_id)
+            .find(|entry| {
+                entry
+                    .with_profile_defaults(mesh_config.defaults.as_ref())
+                    .derived_profile()
+                    == request.model_id
+            })
+            .or_else(|| {
+                mesh_config
+                    .models
+                    .iter()
+                    .find(|entry| entry.model == request.model_id)
+            })
             .or_else(|| find_model_entry_by_resolved_path(mesh_config, request.model_path));
         let defaults = mesh_config.defaults.as_ref();
         let model_fit = model_entry.and_then(|entry| entry.model_fit.as_ref());
@@ -542,8 +553,11 @@ fn resolve_split_mode(
         Some(value) if value.eq_ignore_ascii_case("none") => Ok(skippy_protocol::SplitMode::None),
         Some(value) if value.eq_ignore_ascii_case("layer") => Ok(skippy_protocol::SplitMode::Layer),
         Some(value) if value.eq_ignore_ascii_case("row") => Ok(skippy_protocol::SplitMode::Row),
+        Some(value) if value.eq_ignore_ascii_case("tensor") => {
+            Ok(skippy_protocol::SplitMode::Tensor)
+        }
         Some(other) => bail!(
-            "hardware.split_mode must be \"auto\", \"none\", \"layer\", or \"row\", got {other:?}"
+            "hardware.split_mode must be \"auto\", \"none\", \"layer\", \"row\", or \"tensor\", got {other:?}"
         ),
     }
 }

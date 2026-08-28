@@ -882,7 +882,7 @@ advertise_addr = "127.0.0.1:0"
     }
 
     #[test]
-    fn telemetry_config_rejects_prompt_shape_metrics_until_reviewed() {
+    fn telemetry_config_accepts_prompt_shape_metrics_after_review() {
         let config: MeshConfig = toml::from_str(
             r#"
 [telemetry]
@@ -891,12 +891,7 @@ prompt_shape_metrics = true
         )
         .unwrap();
 
-        let err = validate_config(&config).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("telemetry.prompt_shape_metrics is not supported yet"),
-            "unexpected error: {err}"
-        );
+        validate_config(&config).expect("prompt shape metrics should validate");
     }
 
     #[test]
@@ -1364,7 +1359,7 @@ ctx_size = 4096
 kv_cache_policy = "balanced"
 
 [defaults.hardware]
-model_runtime = "cuda"
+gpu_layers = 10
 
 [defaults.throughput]
 parallel = 2
@@ -1391,8 +1386,8 @@ model = "Qwen3-8B-Q4_K_M"
         let defaults = config.defaults.expect("defaults should parse");
         assert_eq!(defaults.model_fit.and_then(|v| v.ctx_size), Some(4096));
         assert_eq!(
-            defaults.hardware.and_then(|v| v.model_runtime),
-            Some(ModelRuntimeKind::Cuda)
+            defaults.hardware.and_then(|v| v.gpu_layers),
+            Some(IntegerOrString::Integer(10))
         );
         assert_eq!(defaults.throughput.and_then(|v| v.parallel), Some(2));
         assert_eq!(
@@ -1425,7 +1420,6 @@ prompt_cache = "auto"
 context_shift = "auto"
 
 [defaults.hardware]
-model_runtime = "auto"
 gpu_layers = "auto"
 tensor_split = []
 split_mode = "auto"
@@ -1434,7 +1428,6 @@ safety_margin_gb = 2.0
 mmap = "auto"
 mlock = false
 direct_io = false
-warmup = "auto"
 
 [defaults.throughput]
 parallel = 1
@@ -1626,7 +1619,7 @@ split_mode = "diagonal"
         let err = validate_config(&config).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "models[0].hardware.split_mode must be one of: auto, none, layer, row"
+            "models[0].hardware.split_mode must be one of: auto, none, layer, row, tensor"
         );
     }
 

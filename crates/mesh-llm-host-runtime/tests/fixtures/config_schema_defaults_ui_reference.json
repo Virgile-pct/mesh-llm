@@ -204,6 +204,20 @@
       }
     },
     {
+      "canonical_path": "defaults.hardware.use_mmap_buffer",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.hardware.use_mmap_prefetch",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
       "canonical_path": "defaults.hardware.warmup",
       "support": "supported",
       "source": {

@@ -71,9 +71,9 @@ pub(crate) use stage::{
     LayerRange, SourceModelKind, StageCancelPrepareRequest, StageControlCommand,
     StageControlHandle, StageControlRequest, StageControlResponse, StageCoordinatorClaim,
     StageCoordinatorClaimAck, StageInventoryRequest, StageLayerInventory, StageLoadRequest,
-    StagePackagePrefetcher, StagePeerDescriptor, StagePreparationState, StagePreparationStatus,
-    StagePrepareAcceptedResponse, StagePrepareRequest, StageReadyResponse, StageRuntimeState,
-    StageStatusAck, StageStatusFilter, StageStatusSnapshot, StageStopRequest,
+    StageLoadRuntimeSettings, StagePackagePrefetcher, StagePeerDescriptor, StagePreparationState,
+    StagePreparationStatus, StagePrepareAcceptedResponse, StagePrepareRequest, StageReadyResponse,
+    StageRuntimeState, StageStatusAck, StageStatusFilter, StageStatusSnapshot, StageStopRequest,
     spawn_stage_control_loop, stage_load_timeout,
 };
 #[cfg(test)]
