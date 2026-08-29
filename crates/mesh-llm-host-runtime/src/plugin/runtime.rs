@@ -421,7 +421,7 @@ impl ExternalPlugin {
         }
 
         if let Some(remote_url) = self.spec.url.as_deref()
-            && url::Url::parse(remote_url.trim()).is_ok_and(|url| url.scheme() == "tcp")
+            && url::Url::parse(remote_url).is_ok_and(|url| url.scheme() == "tcp")
         {
             return reject_remote_control(remote_url);
         }
