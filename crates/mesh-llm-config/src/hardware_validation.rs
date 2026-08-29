@@ -116,6 +116,12 @@ pub(crate) fn validate_hardware(
     if let Some(tensor_split) = &config.tensor_split {
         match tensor_split {
             TensorSplitConfig::Ratios(ratios) => {
+                if ratios.is_empty() {
+                    return Err(validation_diagnostic(
+                        &format!("{base_path}.tensor_split"),
+                        format!("{base_path}.tensor_split must contain at least one ratio"),
+                    ));
+                }
                 for ratio in ratios {
                     if *ratio < 0.0 {
                         return Err(validation_diagnostic(
