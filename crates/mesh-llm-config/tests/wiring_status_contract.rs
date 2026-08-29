@@ -15,8 +15,8 @@
 //! error rather than reporting the config valid.
 
 use mesh_llm_config::{
-    ConfigDiagnosticSeverity, MeshConfig, WIRING_MANIFEST, WiringBehavior, WiringStatus,
-    built_in_config_schema, validate_config_diagnostics,
+    ConfigDiagnosticSeverity, ConfigSupportState, MeshConfig, WIRING_MANIFEST, WiringBehavior,
+    WiringStatus, built_in_config_schema, validate_config_diagnostics,
 };
 
 #[test]
@@ -180,6 +180,41 @@ fn wiring_manifest_covers_every_builtin_schema_path_in_both_directions() {
     assert!(
         stale.is_empty(),
         "wiring manifest paths missing from schema: {stale:?}"
+    );
+}
+
+#[test]
+fn builtin_schema_support_matches_structured_wiring_status() {
+    let schema = built_in_config_schema();
+    let mismatches = schema
+        .settings
+        .iter()
+        .filter_map(|setting| {
+            let rendered = setting
+                .path
+                .render()
+                .replace("plugin.<plugin-name>", "plugin.<name>");
+            let path = rendered
+                .strip_prefix("defaults.")
+                .or_else(|| rendered.strip_prefix("models.<model-ref>."))
+                .unwrap_or(&rendered);
+            let entry = WIRING_MANIFEST
+                .iter()
+                .find(|entry| entry.path.trim_end_matches(".*") == path)
+                .unwrap_or_else(|| panic!("schema path {rendered} must have a wiring entry"));
+            let expected = match entry.status {
+                WiringStatus::Wired => ConfigSupportState::Supported,
+                WiringStatus::Partial => ConfigSupportState::Experimental,
+                WiringStatus::Unwired => ConfigSupportState::Unwired,
+                WiringStatus::Rejected => ConfigSupportState::Rejected,
+            };
+            (setting.support != expected).then_some((rendered, setting.support, expected))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        mismatches.is_empty(),
+        "built-in schema support disagrees with structured wiring status: {mismatches:#?}"
     );
 }
 
