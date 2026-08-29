@@ -87,6 +87,7 @@ fn find_profile_model_overrides<'a>(
 pub(crate) async fn run_auto_load_runtime_model(
     ctx: &mut RunAutoRuntimeLoopContext<'_>,
     spec: String,
+    config_model_id: Option<String>,
     profile: String,
 ) -> Result<api::RuntimeLoadResponse> {
     let load_started = Instant::now();
@@ -106,7 +107,8 @@ pub(crate) async fn run_auto_load_runtime_model(
         .unwrap_or_else(|| models::model_ref_for_path(&model_path));
     let requested_model = spec.clone();
     let model_bytes = plan_runtime_model_bytes(&model_path, &requested_model).await;
-    let model_overrides = find_profile_model_overrides(ctx.config, &spec, &profile);
+    let config_selector = config_model_id.as_deref().unwrap_or(&spec);
+    let model_overrides = find_profile_model_overrides(ctx.config, config_selector, &profile);
     let ctx_size_override = runtime_model_ctx_size_override(ctx.options, model_overrides);
     let parallel_override = crate::runtime::startup_models::resolve_model_parallel_override(
         model_overrides.and_then(|m| m.parallel),
@@ -131,7 +133,7 @@ pub(crate) async fn run_auto_load_runtime_model(
         LocalRuntimeModelStartSpec {
             node: ctx.node,
             mesh_config: ctx.config,
-            config_model_id: Some(&profile),
+            config_model_id: model_overrides.map(|model| model.model.as_str()),
             model_path: &model_path,
             model_bytes,
             mmproj_override: None,

@@ -51,6 +51,7 @@ pub(super) struct SplitGenerationLoadSpec<'a> {
     pub(super) node: &'a mesh::Node,
     pub(super) mesh_config: &'a plugin::MeshConfig,
     pub(super) model_ref: &'a str,
+    pub(super) config_model_id: Option<&'a str>,
     pub(super) model_path: &'a Path,
     pub(super) package: &'a skippy::SkippyPackageIdentity,
     pub(super) generation: &'a SplitTopologyGeneration,
@@ -88,9 +89,9 @@ pub(super) struct StageLifecycleIntervals {
 
 pub(super) fn configured_stage_lifecycle_intervals(
     mesh_config: &plugin::MeshConfig,
-    model_ref: &str,
+    config_model_id: Option<&str>,
 ) -> StageLifecycleIntervals {
-    let model = model_skippy_config(mesh_config, model_ref);
+    let model = config_model_id.and_then(|selector| model_skippy_config(mesh_config, selector));
     let defaults = mesh_config
         .defaults
         .as_ref()
@@ -557,15 +558,18 @@ pub(super) async fn split_generation_load_settings<'a>(
     let load_mode = split_generation_load_mode(spec.package);
     let activation_width =
         skippy_stage_activation_width(spec.package.activation_width, spec.model_ref)?;
-    let mut resolved = skippy::resolve_skippy_config(skippy::SkippyConfigResolveRequest {
-        mesh_config: spec.mesh_config,
-        model_id: spec.model_ref,
-        model_path: spec.model_path,
-        model_bytes: spec.package.source_model_bytes,
-        allocatable_memory_bytes: spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()),
-        request_defaults: None,
-        package_generation: spec.package.generation.as_ref(),
-    })?;
+    let mut resolved = skippy::resolve_skippy_config_for_selector(
+        skippy::SkippyConfigResolveRequest {
+            mesh_config: spec.mesh_config,
+            model_id: spec.model_ref,
+            model_path: spec.model_path,
+            model_bytes: spec.package.source_model_bytes,
+            allocatable_memory_bytes: spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()),
+            request_defaults: None,
+            package_generation: spec.package.generation.as_ref(),
+        },
+        spec.config_model_id,
+    )?;
     resolved.materialize_projector_url().await?;
     resolved.model_fit.ctx_size = spec.ctx_size;
     resolved.throughput.parallel = spec.slots;
@@ -591,7 +595,7 @@ pub(super) async fn split_generation_load_settings<'a>(
         resolved.hardware.device = Some(gpu.backend_device.clone());
     }
     let embedded_openai = resolved.to_embedded_openai_args(activation_width, true)?;
-    let lifecycle = configured_stage_lifecycle_intervals(spec.mesh_config, spec.model_ref);
+    let lifecycle = configured_stage_lifecycle_intervals(spec.mesh_config, spec.config_model_id);
     let runtime_options = resolved.to_embedded_runtime_options(
         &spec.skippy_telemetry,
         Some(spec.package.clone()),

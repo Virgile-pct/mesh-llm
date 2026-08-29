@@ -17,7 +17,9 @@ mod tests;
 #[cfg(test)]
 mod exact_head_tests;
 
+#[cfg(test)]
 pub(crate) use resolution::resolve_skippy_config;
+pub(crate) use resolution::resolve_skippy_config_for_selector;
 pub(crate) use types::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
 };

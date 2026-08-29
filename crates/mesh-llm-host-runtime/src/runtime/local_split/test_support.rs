@@ -345,6 +345,16 @@ async fn split_generation_load_settings_consumes_resolved_skippy_config() {
     let mesh_config: plugin::MeshConfig = toml::from_str(&format!(
         r#"
 [[models]]
+model = "other/model"
+
+[models.hardware]
+model_path = "{model_path}"
+
+[models.throughput]
+threads = 17
+threads_batch = 13
+
+[[models]]
 model = "Qwen"
 
 [models.model_fit]
@@ -405,7 +415,8 @@ stop = ["END"]
     let spec = SplitGenerationLoadSpec {
         node: &node,
         mesh_config: &mesh_config,
-        model_ref: "Qwen",
+        model_ref: "served-qwen",
+        config_model_id: Some("Qwen"),
         model_path: &model_path,
         package: &package,
         generation: &generation,
@@ -485,6 +496,16 @@ async fn runtime_resolver_uses_config_model_id_but_preserves_served_model_id() {
     write_fake_gguf_model(&model_path);
     let mesh_config: plugin::MeshConfig = toml::from_str(&format!(
         r#"
+[[models]]
+model = "other/model-ref"
+
+[models.hardware]
+model_path = "{model_path}"
+
+[models.throughput]
+threads = 17
+threads_batch = 13
+
 [[models]]
 model = "configured/model-ref"
 

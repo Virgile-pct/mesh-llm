@@ -166,7 +166,7 @@ pub(super) async fn run_local_model_only(mut options: RuntimeOptions) -> Result<
     );
     let launch = LocalOpenAiModelStartSpec {
         mesh_config: &config,
-        config_model_id: Some(&model.profile),
+        config_model_id: model.config_model_id.as_deref(),
         model_path: &model.resolved_path,
         model_bytes,
         mmproj_override: model.mmproj_path.as_deref(),

@@ -2187,7 +2187,7 @@ draft_min_tokens = 0
 }
 
 #[test]
-fn benchmark_shaped_hf_identity_row_matches_by_pinned_model_path_after_canonicalization() {
+fn benchmark_shaped_hf_identity_row_uses_explicit_canonical_config_selector() {
     let model_file = temp_model_file();
     let toml = format!(
         r#"
@@ -2209,16 +2209,19 @@ draft_max_tokens = 4
     );
     let mesh_config = parse_config(&toml);
 
-    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
-        mesh_config: &mesh_config,
-        model_id: "Qwen/Qwen3-GGUF:Q4_K_M",
-        model_path: model_file.path(),
-        model_bytes: 4 * 1024 * 1024 * 1024,
-        allocatable_memory_bytes: None,
-        request_defaults: None,
-        package_generation: None,
-    })
-    .expect("benchmark HF identity row should match by pinned model_path");
+    let resolved = resolve_skippy_config_for_selector(
+        SkippyConfigResolveRequest {
+            mesh_config: &mesh_config,
+            model_id: "Qwen/Qwen3-GGUF:Q4_K_M",
+            model_path: model_file.path(),
+            model_bytes: 4 * 1024 * 1024 * 1024,
+            allocatable_memory_bytes: None,
+            request_defaults: None,
+            package_generation: None,
+        },
+        Some("Qwen/Qwen3-GGUF@sha/qwen3-q4_k_m.gguf"),
+    )
+    .expect("benchmark HF identity row should match by canonical config selector");
 
     let openai = resolved
         .to_embedded_openai_args(0, false)

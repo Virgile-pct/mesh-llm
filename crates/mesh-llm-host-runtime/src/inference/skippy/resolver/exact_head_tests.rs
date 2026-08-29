@@ -58,15 +58,18 @@ fn canonical_selector_wins_over_another_models_derived_profile() {
     let (config, temp_dir, colliding_selector) = colliding_selector_config();
     let canonical_path = temp_dir.path().join("canonical.gguf");
 
-    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
-        mesh_config: &config,
-        model_id: &colliding_selector,
-        model_path: &canonical_path,
-        model_bytes: 1024,
-        allocatable_memory_bytes: None,
-        request_defaults: None,
-        package_generation: None,
-    })
+    let resolved = resolve_skippy_config_for_selector(
+        SkippyConfigResolveRequest {
+            mesh_config: &config,
+            model_id: "served-canonical",
+            model_path: &canonical_path,
+            model_bytes: 1024,
+            allocatable_memory_bytes: None,
+            request_defaults: None,
+            package_generation: None,
+        },
+        Some(&colliding_selector),
+    )
     .expect("canonical model config resolves");
 
     assert_eq!(resolved.throughput.threads, Some(3));
@@ -78,15 +81,18 @@ fn served_alias_and_resolved_path_do_not_select_model_specific_config() {
     let (config, temp_dir, _) = colliding_selector_config();
     let canonical_path = temp_dir.path().join("canonical.gguf");
 
-    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
-        mesh_config: &config,
-        model_id: "served-canonical",
-        model_path: &canonical_path,
-        model_bytes: 1024,
-        allocatable_memory_bytes: None,
-        request_defaults: None,
-        package_generation: None,
-    })
+    let resolved = resolve_skippy_config_for_selector(
+        SkippyConfigResolveRequest {
+            mesh_config: &config,
+            model_id: "served-canonical",
+            model_path: &canonical_path,
+            model_bytes: 1024,
+            allocatable_memory_bytes: None,
+            request_defaults: None,
+            package_generation: None,
+        },
+        None,
+    )
     .expect("unconfigured served identity resolves defaults");
 
     assert_eq!(resolved.throughput.threads, None);
