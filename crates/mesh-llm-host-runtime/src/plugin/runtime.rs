@@ -852,22 +852,33 @@ impl ExternalPlugin {
 
     async fn handle_runtime_failure(&self, generation: Option<u64>, reason: String) {
         let reason = crate::logging::policy::redact_urls_in_text(&reason);
-        let mut runtime = self.runtime.lock().await;
-        let should_clear = generation
-            .map(|generation| runtime.as_ref().map(|r| r.generation) == Some(generation))
-            .unwrap_or(true);
-        let failed_runtime = should_clear.then(|| runtime.take()).flatten();
-        drop(runtime);
+        let failed_runtime = {
+            let mut runtime = self.runtime.lock().await;
+            let is_current_generation = generation
+                .map(|generation| runtime.as_ref().map(|r| r.generation) == Some(generation))
+                .unwrap_or(true);
+            if !is_current_generation {
+                return;
+            }
+
+            let failed_runtime = runtime.take();
+            *self.server_info.lock().await = None;
+            *self.manifest.lock().await = None;
+            let mut summary = self.summary.lock().await;
+            summary.status = "restarting".into();
+            summary.pid = None;
+            summary.version = None;
+            summary.capabilities.clear();
+            summary.tools.clear();
+            summary.error = Some(reason.clone());
+            drop(summary);
+            self.runtime_data_producer
+                .clear_plugin_reports(&self.spec.name);
+            failed_runtime
+        };
         if let Some(runtime) = failed_runtime {
             stop_runtime(runtime, &reason).await;
         }
-        *self.server_info.lock().await = None;
-        *self.manifest.lock().await = None;
-        let mut summary = self.summary.lock().await;
-        summary.status = "restarting".into();
-        summary.pid = None;
-        summary.error = Some(reason);
-        drop(summary);
         self.publish_summary().await;
     }
 
