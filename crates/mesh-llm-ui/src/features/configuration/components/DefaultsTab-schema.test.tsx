@@ -352,6 +352,16 @@ describe('DefaultsTab dependency and schema controls', () => {
     expect(screen.getByRole('textbox', { name: 'Stage 2 Hostname' })).toHaveValue('worker-b')
     expect(screen.getByRole('spinbutton', { name: 'Stage 2 Layer start' })).toHaveValue(16)
 
+    await user.hover(settingInfoTrigger(settingsRow('Topology stages')))
+    expect(
+      await screen.findByText('Structured list: add, remove, or reorder entries below.', { selector: 'div' })
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText('List input: enter one item per line. Saved as a TOML string array.')
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Object input: enter a JSON object.')).not.toBeInTheDocument()
+    await user.unhover(settingInfoTrigger(settingsRow('Topology stages')))
+
     await user.click(screen.getByRole('button', { name: 'Move stage 2 up' }))
     expect(onSettingValueChange).toHaveBeenLastCalledWith(
       'topology-stages',
