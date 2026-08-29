@@ -627,6 +627,46 @@ describe('configuration schema and status adaptation', () => {
     })
   })
 
+  it('projects typed topology stages into model settings', () => {
+    const topologyStageSchema = {
+      kind: 'array' as const,
+      items: {
+        kind: 'object' as const,
+        properties: [
+          {
+            name: 'node',
+            label: 'Node',
+            required: true,
+            value_schema: {
+              kind: 'object' as const,
+              properties: [
+                {
+                  name: 'endpoint_id',
+                  label: 'Endpoint ID',
+                  required: false,
+                  value_schema: { kind: 'string' as const }
+                },
+                { name: 'hostname', label: 'Hostname', required: false, value_schema: { kind: 'string' as const } }
+              ]
+            }
+          },
+          { name: 'layer_start', label: 'Layer start', required: true, value_schema: { kind: 'integer' as const } },
+          { name: 'layer_end', label: 'Layer end', required: true, value_schema: { kind: 'integer' as const } }
+        ]
+      }
+    }
+    const schema: RuntimeConfigSchemaReference = {
+      settings: [schemaSetting('defaults.topology.stages', 'topology-stages', topologyStageSchema)]
+    }
+
+    const topologyStages = createConfigurationModelSettingsFromSchema(schema).settings.find(
+      (setting) => setting.id === 'defaults.topology.stages'
+    )
+
+    expect(topologyStages?.valueSchema).toEqual(topologyStageSchema)
+    expect(topologyStages?.control).toMatchObject({ kind: 'text', name: 'stages', value: '' })
+  })
+
   it('keeps the backend defaults UI fixture and generated defaults settings in exact path parity', () => {
     const defaults = createConfigurationDefaultsFromSchema(BACKEND_SCHEMA_REFERENCE)
     const expectedDefaultPaths = BACKEND_DEFAULTS_UI_REFERENCE.settings

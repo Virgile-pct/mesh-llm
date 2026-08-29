@@ -341,4 +341,33 @@ describe('DefaultsTab dependency and schema controls', () => {
       })
     ).toBeInTheDocument()
   })
+
+  it('loads and authors schema-defined object array rows', async () => {
+    const user = userEvent.setup()
+    const onSettingValueChange = vi.fn()
+
+    renderDefaultsTab({ data: schemaDrivenControlData, onSettingValueChange })
+
+    expect(screen.getByRole('textbox', { name: 'Stage 1 Endpoint ID' })).toHaveValue('endpoint-a')
+    expect(screen.getByRole('textbox', { name: 'Stage 2 Hostname' })).toHaveValue('worker-b')
+    expect(screen.getByRole('spinbutton', { name: 'Stage 2 Layer start' })).toHaveValue(16)
+
+    await user.click(screen.getByRole('button', { name: 'Move stage 2 up' }))
+    expect(onSettingValueChange).toHaveBeenLastCalledWith(
+      'topology-stages',
+      '[{"node":{"hostname":"worker-b"},"layer_start":16,"layer_end":32},{"node":{"endpoint_id":"endpoint-a"},"layer_start":0,"layer_end":16}]'
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Remove stage 1' }))
+    expect(onSettingValueChange).toHaveBeenLastCalledWith(
+      'topology-stages',
+      '[{"node":{"hostname":"worker-b"},"layer_start":16,"layer_end":32}]'
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Add stage' }))
+    expect(onSettingValueChange).toHaveBeenLastCalledWith(
+      'topology-stages',
+      '[{"node":{"endpoint_id":"endpoint-a"},"layer_start":0,"layer_end":16},{"node":{"hostname":"worker-b"},"layer_start":16,"layer_end":32},{"node":{},"layer_start":0,"layer_end":0}]'
+    )
+  })
 })
