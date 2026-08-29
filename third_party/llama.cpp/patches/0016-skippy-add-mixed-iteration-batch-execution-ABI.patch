@@ -1,7 +1,7 @@
 From 25be3b945ff84b4c47e1f6d520c5a185b7a8883c Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 24 Aug 2026 15:35:31 +1000
-Subject: [PATCH 16/18] skippy: add mixed iteration batch execution ABI
+Subject: [PATCH 16/26] skippy: add mixed iteration batch execution ABI
 
 ---
  include/skippy/common.h        |  11 +-
@@ -484,4 +484,4 @@ index a8694dbed..8f6facc96 100644
          struct skippy_session * const * sessions,
          const llama_token * token_ids,
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
