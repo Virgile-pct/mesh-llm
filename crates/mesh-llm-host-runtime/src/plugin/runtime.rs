@@ -961,6 +961,7 @@ fn plugin_web_ui_asset_root(spec: &ExternalPluginSpec) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::{MeshConfig, PluginConfigEntry, resolve_plugins};
     use super::super::transport::{read_envelope, write_envelope};
     use super::*;
     use crate::runtime_data::{PluginDataKey, RuntimeDataCollector, RuntimeDataSource};
@@ -1179,15 +1180,28 @@ mod tests {
     }
 
     #[test]
-    fn child_env_includes_configured_plugin_url() {
-        let temp_dir = TempDir::new().expect("temp dir should be created");
-        let mut spec = plugin_spec(
-            &temp_dir,
-            None,
-            InstalledPluginWebUiValidationStatus::Valid,
-            None,
-        );
-        spec.url = Some("https://plugin.example.test/v1".into());
+    fn configured_plugin_url_is_normalized_before_child_env_export() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: "demo".into(),
+                enabled: Some(true),
+                web_ui_enabled: None,
+                command: Some("mesh-llm-plugin-demo".into()),
+                args: Vec::new(),
+                url: Some("\u{2003}https://plugin.example.test/v1\u{2003}".into()),
+                settings: BTreeMap::new(),
+                startup: Default::default(),
+            }],
+            ..MeshConfig::default()
+        };
+        let spec = resolve_plugins(&config, test_host_mode())
+            .expect("configured plugin should resolve")
+            .externals
+            .into_iter()
+            .find(|spec| spec.name == "demo")
+            .expect("configured plugin spec should be stored");
+
+        assert_eq!(spec.url.as_deref(), Some("https://plugin.example.test/v1"));
         let plugin = plugin_for_spec(spec);
 
         let command = plugin.configured_child_command("endpoint", "unix");

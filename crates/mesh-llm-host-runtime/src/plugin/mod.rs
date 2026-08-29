@@ -1744,7 +1744,29 @@ mod tests {
     }
 
     #[test]
+    fn external_plugin_rejects_url_that_is_empty_after_normalization() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: "endpoint-plugin".into(),
+                enabled: Some(true),
+                web_ui_enabled: None,
+                command: Some("endpoint-plugin".into()),
+                args: Vec::new(),
+                url: Some("\u{2003}\t\n".into()),
+                settings: Default::default(),
+                startup: Default::default(),
+            }],
+            ..MeshConfig::default()
+        };
+
+        let error = resolve_plugins(&config, private_host_mode())
+            .expect_err("normalized plugin URL must not be empty");
+        assert!(error.to_string().contains("plugin URL must not be empty"));
+    }
+
+    #[test]
     fn remote_plugin_control_url_is_rejected_without_authentication() {
+        let raw_url = "\u{2003}tcp://user:secret@127.0.0.1:19091/control?token=private\u{2003}";
         let config = MeshConfig {
             plugins: vec![PluginConfigEntry {
                 name: "remote-plugin".into(),
@@ -1752,7 +1774,7 @@ mod tests {
                 web_ui_enabled: None,
                 command: None,
                 args: Vec::new(),
-                url: Some("tcp://127.0.0.1:19091".into()),
+                url: Some(raw_url.into()),
                 settings: Default::default(),
                 startup: Default::default(),
             }],
@@ -1762,11 +1784,12 @@ mod tests {
 
         let error = resolve_plugins(&config, private_host_mode())
             .expect_err("unauthenticated remote plugin control must be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("authenticated capability handshake")
-        );
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("authenticated capability handshake"));
+        assert!(!diagnostic.contains("user"));
+        assert!(!diagnostic.contains("secret"));
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains(raw_url));
     }
 
     #[test]
