@@ -963,8 +963,11 @@ fn plugin_web_ui_asset_root(spec: &ExternalPluginSpec) -> Option<PathBuf> {
 mod tests {
     use super::super::config::{MeshConfig, PluginConfigEntry, resolve_plugins};
     use super::super::transport::{read_envelope, write_envelope};
+    use super::super::{PluginCapabilityProvider, PluginEndpointSummary};
     use super::*;
-    use crate::runtime_data::{PluginDataKey, RuntimeDataCollector, RuntimeDataSource};
+    use crate::runtime_data::{
+        PluginDataKey, PluginEndpointKey, RuntimeDataCollector, RuntimeDataSource,
+    };
     use mesh_llm_plugin::MeshVisibility;
     use mesh_llm_plugin_manager::store::{
         InstalledPluginManifestMetadata, InstalledPluginMetadata,
@@ -1157,6 +1160,158 @@ mod tests {
         summary.version = Some("v1.0.0".into());
         summary.capabilities = vec!["operation:echo".into()];
         summary.error = None;
+    }
+
+    fn generation_manifest(label: &str) -> proto::PluginManifest {
+        proto::PluginManifest {
+            capabilities: vec![format!("capability:{label}")],
+            operations: vec![proto::OperationManifest {
+                name: format!("{label}.echo"),
+                description: format!("{label} echo operation"),
+                input_schema_json: r#"{"type":"object"}"#.into(),
+                output_schema_json: None,
+                title: None,
+            }],
+            ..proto::PluginManifest::default()
+        }
+    }
+
+    async fn install_test_generation(plugin: &ExternalPlugin, generation: u64, label: &str) {
+        if let Some(runtime) = plugin.runtime.lock().await.take() {
+            stop_runtime(runtime, "test runtime replaced").await;
+        }
+        mark_plugin_running(plugin, generation).await;
+
+        let manifest = generation_manifest(label);
+        *plugin.server_info.lock().await = Some(ServerInfo::default());
+        *plugin.manifest.lock().await = Some(manifest.clone());
+        {
+            let mut summary = plugin.summary.lock().await;
+            summary.version = Some(format!("{label}-version"));
+            summary.capabilities = vec![format!("capability:{label}")];
+            summary.tools = manifest_tool_summaries(&manifest);
+            summary.error = None;
+        }
+        plugin.publish_summary().await;
+        plugin
+            .runtime_data_producer
+            .publish_plugin_manifest(plugin_manifest_overview(&manifest));
+        plugin
+            .runtime_data_producer
+            .publish_plugin_providers(vec![PluginCapabilityProvider {
+                capability: format!("capability:{label}"),
+                plugin_name: plugin.name().into(),
+                plugin_status: "running".into(),
+                endpoint_id: Some(format!("{label}-endpoint")),
+                available: true,
+                detail: None,
+            }]);
+        plugin
+            .runtime_data_producer
+            .publish_plugin_payload("generation", serde_json::json!(label));
+        plugin
+            .runtime_data_producer
+            .collector()
+            .producer(RuntimeDataSource {
+                scope: "test",
+                plugin_data_key: None,
+                plugin_endpoint_key: Some(PluginEndpointKey {
+                    plugin_name: plugin.name().into(),
+                    endpoint_id: format!("{label}-endpoint"),
+                }),
+            })
+            .publish_plugin_endpoint(PluginEndpointSummary {
+                plugin_name: plugin.name().into(),
+                plugin_status: "running".into(),
+                endpoint_id: format!("{label}-endpoint"),
+                state: "healthy".into(),
+                available: true,
+                kind: "mcp".into(),
+                transport_kind: "http".into(),
+                protocol: Some("http".into()),
+                address: Some(format!("http://127.0.0.1/{label}")),
+                args: Vec::new(),
+                namespace: Some(format!("demo.{label}")),
+                supports_streaming: true,
+                managed_by_plugin: true,
+                detail: None,
+                models: Vec::new(),
+            });
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_failure_preserves_replacement_generation_metadata() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let (plugin, runtime_data) = plugin_for_spec_with_runtime_data(plugin_spec(
+            &temp_dir,
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        ));
+        install_test_generation(&plugin, 41, "generation-a").await;
+        install_test_generation(&plugin, 42, "generation-b").await;
+
+        let replacement_summary = plugin.summary().await;
+        let replacement_server_info = plugin.server_info.lock().await.clone();
+        let replacement_manifest = plugin.manifest.lock().await.clone();
+        let replacement_reports = runtime_data.plugin_snapshot(plugin.name());
+
+        plugin
+            .handle_runtime_failure(Some(41), "generation A failed late".into())
+            .await;
+
+        assert_eq!(
+            plugin
+                .runtime
+                .lock()
+                .await
+                .as_ref()
+                .map(|runtime| runtime.generation),
+            Some(42)
+        );
+        assert_eq!(*plugin.server_info.lock().await, replacement_server_info);
+        assert_eq!(*plugin.manifest.lock().await, replacement_manifest);
+        assert_eq!(plugin.summary().await, replacement_summary);
+        assert_eq!(
+            runtime_data.plugin_snapshot(plugin.name()),
+            replacement_reports
+        );
+
+        plugin.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn current_runtime_failure_clears_its_generation_metadata() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let (plugin, runtime_data) = plugin_for_spec_with_runtime_data(plugin_spec(
+            &temp_dir,
+            None,
+            InstalledPluginWebUiValidationStatus::Valid,
+            None,
+        ));
+        install_test_generation(&plugin, 51, "current-generation").await;
+
+        plugin
+            .handle_runtime_failure(Some(51), "current generation failed".into())
+            .await;
+
+        assert!(plugin.runtime.lock().await.is_none());
+        assert!(plugin.server_info.lock().await.is_none());
+        assert!(plugin.manifest.lock().await.is_none());
+        let summary = plugin.summary().await;
+        assert_eq!(summary.status, "restarting");
+        assert!(summary.pid.is_none());
+        assert!(summary.version.is_none());
+        assert!(summary.capabilities.is_empty());
+        assert!(summary.tools.is_empty());
+        assert_eq!(summary.error.as_deref(), Some("current generation failed"));
+
+        let reports = runtime_data.plugin_snapshot(plugin.name());
+        assert_eq!(reports.summary, Some(summary));
+        assert!(reports.manifest.is_none());
+        assert!(reports.providers.is_empty());
+        assert!(reports.payloads.is_empty());
+        assert!(reports.endpoints.is_empty());
     }
 
     #[test]
