@@ -556,6 +556,7 @@ export function createConfigurationModelSettingsFromSchema(
       entry.canonical_path.startsWith('gpu.') ||
       entry.canonical_path.startsWith('defaults.model_fit.') ||
       entry.canonical_path.startsWith('defaults.hardware.') ||
+      entry.canonical_path.startsWith('defaults.topology.') ||
       entry.canonical_path.startsWith('defaults.speculative.') ||
       entry.canonical_path.startsWith('defaults.request_defaults.') ||
       entry.canonical_path.startsWith('defaults.multimodal.'),
