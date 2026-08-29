@@ -165,6 +165,7 @@ pub(crate) async fn run_auto_load_runtime_model(
             ctx.survey_telemetry.record_launch_failure(
                 survey::SurveyModelSpec {
                     model: &requested_model,
+                    configured_model_selector: config_model_id.as_deref(),
                     model_path: Some(&model_path),
                     launch_kind: survey::SurveyLaunchKind::RuntimeLoad,
                     pinned_gpu: None,
@@ -186,6 +187,7 @@ pub(crate) async fn run_auto_load_runtime_model(
     };
     let survey_loaded_model = ctx.survey_telemetry.model(survey::SurveyModelSpec {
         model: &loaded_name,
+        configured_model_selector: config_model_id.as_deref(),
         model_path: Some(&model_path),
         launch_kind: survey::SurveyLaunchKind::RuntimeLoad,
         pinned_gpu: None,

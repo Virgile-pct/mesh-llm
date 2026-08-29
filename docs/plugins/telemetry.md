@@ -140,11 +140,20 @@ tools plus strict structured output stays unsupported in v1. See
 `docs/design/OPENAI_GUARDRAILS.md` for the rollout contract and evidence path.
 
 External request model values are not exported by lifecycle, request, route, or
-prompt-shape metrics. GPU stable IDs and node IDs are exported as
-stable pseudonymous hashes, not raw identifiers. Route-attempt metrics label
-local, remote, and endpoint target kinds; remote target IDs are exported only as
-stable hashes so collectors can aggregate node-to-node traffic without exposing
-raw peer IDs.
+prompt-shape metrics. Configured model lifecycle metrics use a stable
+pseudonymous identifier derived from the canonical configured model selector.
+The identifier correlates launch, loaded-state, unload, and unexpected-exit
+records for one selector without exporting the raw selector, repository name,
+filename, path, alias, or profile. It is a domain-separated, deterministic
+128-bit SHA-256 prefix rendered as fixed-length lowercase hex. It is
+pseudonymous rather than anonymous metadata: a collector can correlate the
+same configured selector across events and process restarts. Its fixed width
+bounds label size, while per-process series cardinality is bounded by the
+configured models represented in lifecycle telemetry. GPU stable IDs and node
+IDs are likewise exported as stable pseudonymous hashes, not raw identifiers.
+Route-attempt metrics label local, remote, and endpoint target kinds; remote
+target IDs are exported only as stable hashes so collectors can aggregate
+node-to-node traffic without exposing raw peer IDs.
 
 Telemetry attributes are intentionally allowlisted in code. Any new exported
 attribute must update the allowlist, tests, and this document before it is added
@@ -153,6 +162,7 @@ to an OTLP record.
 | Attribute | Used by | Privacy handling |
 |---|---|---|
 | `mesh_llm.launch_kind` | lifecycle | Bounded enum. |
+| `mesh_llm.model_selector_id` | lifecycle | Stable pseudonymous identifier for the canonical configured model selector; `sha256:` plus 32 lowercase hex characters. Correlates launch, loaded-state, unload, and unexpected-exit series without exporting selector components. Cardinality is bounded by configured models represented in lifecycle telemetry. |
 | `mesh_llm.gpu_count` | lifecycle | Count only. |
 | `mesh_llm.is_soc` | lifecycle | Boolean only. |
 | `mesh_llm.service_version` | lifecycle, request, route, in-flight | Build version only. |

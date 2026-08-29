@@ -639,6 +639,7 @@ pub(super) fn startup_fallback_survey_spec<'a>(
 ) -> survey::SurveyModelSpec<'a> {
     survey::SurveyModelSpec {
         model: model_name,
+        configured_model_selector: ctx.config_model_id,
         model_path: Some(ctx.model_path),
         launch_kind: survey::SurveyLaunchKind::MoeFallback,
         pinned_gpu: ctx.pinned_gpu,
@@ -870,6 +871,7 @@ pub(super) async fn startup_handle_replace_event(
     state.loaded_name = next.loaded_name;
     state.survey_loaded_model = ctx.survey_telemetry.model(survey::SurveyModelSpec {
         model: &state.loaded_name,
+        configured_model_selector: ctx.config_model_id,
         model_path: Some(ctx.model_path),
         launch_kind: ctx.launch_kind,
         pinned_gpu: ctx.pinned_gpu,
@@ -1128,6 +1130,7 @@ pub(super) async fn startup_launch_runtime(
     };
     let make_launch_failure_spec = || survey::SurveyModelSpec {
         model: model_name,
+        configured_model_selector: config_model_id,
         model_path: Some(model_path),
         launch_kind,
         pinned_gpu,
@@ -1292,6 +1295,7 @@ pub(super) async fn startup_local_model_loop(params: StartupLocalModelTask) {
 
         let survey_loaded_model = params.survey_telemetry.model(survey::SurveyModelSpec {
             model: &loaded_name,
+            configured_model_selector: params.config_model_id.as_deref(),
             model_path: Some(&params.model_path),
             launch_kind: prepared.launch_kind,
             pinned_gpu: params.pinned_gpu.as_ref(),

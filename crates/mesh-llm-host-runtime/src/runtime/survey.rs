@@ -29,6 +29,8 @@ const DEFAULT_EXPORT_INTERVAL_SECS: u64 = 15;
 const DEFAULT_QUEUE_SIZE: usize = 2048;
 const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 const OTLP_METRICS_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+const MODEL_SELECTOR_ID_DOMAIN: &[u8] = b"mesh-llm.telemetry.model-selector.v1\0";
+const MODEL_SELECTOR_ID_DIGEST_BYTES: usize = 16;
 #[cfg(any(debug_assertions, test))]
 const TELEMETRY_ATTRIBUTE_ALLOWLIST: &[&str] = &[
     "llama_stage.verify_window.direct_return_reverse_fallback",
@@ -58,6 +60,7 @@ const TELEMETRY_ATTRIBUTE_ALLOWLIST: &[&str] = &[
     "mesh_llm.logging_terminal_outcome",
     "mesh_llm.logging_webhook_attempt_state",
     "mesh_llm.logging_webhook_delivery_outcome",
+    "mesh_llm.model_selector_id",
     "mesh_llm.quantization",
     "mesh_llm.request_outcome",
     "mesh_llm.route_attempt_bucket",
@@ -131,6 +134,7 @@ pub(super) enum SurveyFailureReason {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SurveyModelSpec<'a> {
     pub(super) model: &'a str,
+    pub(super) configured_model_selector: Option<&'a str>,
     pub(super) model_path: Option<&'a Path>,
     pub(super) launch_kind: SurveyLaunchKind,
     pub(super) pinned_gpu: Option<&'a super::StartupPinnedGpuTarget>,
@@ -513,6 +517,7 @@ fn trimmed_nonempty(value: Option<&str>) -> Option<&str> {
 
 #[derive(Clone, Debug)]
 struct SurveyAttributes {
+    model_selector_id: Option<String>,
     architecture: Option<String>,
     quantization: Option<String>,
     launch_kind: SurveyLaunchKind,
@@ -528,6 +533,7 @@ struct SurveyAttributes {
 impl SurveyAttributes {
     fn from_disabled_spec(spec: SurveyModelSpec<'_>) -> Self {
         Self {
+            model_selector_id: pseudonymous_model_selector_id(spec.configured_model_selector),
             architecture: None,
             quantization: None,
             launch_kind: spec.launch_kind,
@@ -578,6 +584,7 @@ impl SurveyAttributes {
             .and_then(|value| trimmed_nonempty(Some(value.as_str())).map(ToOwned::to_owned))
             .or_else(|| super::dashboard_quantization_from_model_name(spec.model));
         Self {
+            model_selector_id: pseudonymous_model_selector_id(spec.configured_model_selector),
             architecture,
             quantization,
             launch_kind: spec.launch_kind,
@@ -601,6 +608,9 @@ impl SurveyAttributes {
             KeyValue::new("mesh_llm.is_soc", self.is_soc),
             KeyValue::new("mesh_llm.service_version", crate::VERSION),
         ];
+        if let Some(value) = &self.model_selector_id {
+            attrs.push(KeyValue::new("mesh_llm.model_selector_id", value.clone()));
+        }
         if let Some(value) = &self.architecture {
             attrs.push(KeyValue::new("mesh_llm.architecture", value.clone()));
         }
@@ -631,6 +641,18 @@ impl SurveyAttributes {
         debug_assert_telemetry_attrs_allowlisted(&attrs);
         attrs
     }
+}
+
+fn pseudonymous_model_selector_id(configured_model_selector: Option<&str>) -> Option<String> {
+    let configured_model_selector = trimmed_nonempty(configured_model_selector)?;
+    let mut hasher = Sha256::new();
+    hasher.update(MODEL_SELECTOR_ID_DOMAIN);
+    hasher.update(configured_model_selector.as_bytes());
+    let digest = hasher.finalize();
+    Some(format!(
+        "sha256:{}",
+        hex::encode(&digest[..MODEL_SELECTOR_ID_DIGEST_BYTES])
+    ))
 }
 
 fn redact_stable_id(stable_id: &str) -> Option<String> {
@@ -1711,6 +1733,7 @@ mod tests {
         let queue = SurveyEventQueue::new(2);
         for context_length in [1, 2, 3] {
             let attrs = SurveyAttributes {
+                model_selector_id: None,
                 architecture: None,
                 quantization: None,
                 launch_kind: SurveyLaunchKind::Startup,
@@ -1756,6 +1779,7 @@ mod tests {
         let attrs = SurveyAttributes::from_spec(
             SurveyModelSpec {
                 model: "/private/models/Qwen3-8B-Q4_K_M.gguf",
+                configured_model_selector: None,
                 model_path: None,
                 launch_kind: SurveyLaunchKind::RuntimeLoad,
                 pinned_gpu: None,
@@ -1820,6 +1844,7 @@ mod tests {
                 "mesh_llm.logging_terminal_outcome",
                 "mesh_llm.logging_webhook_attempt_state",
                 "mesh_llm.logging_webhook_delivery_outcome",
+                "mesh_llm.model_selector_id",
                 "mesh_llm.quantization",
                 "mesh_llm.request_outcome",
                 "mesh_llm.route_attempt_bucket",
@@ -1836,6 +1861,7 @@ mod tests {
     #[test]
     fn generated_telemetry_attributes_are_allowlisted() {
         let lifecycle_attrs = SurveyAttributes {
+            model_selector_id: Some("sha256:0123456789abcdef0123456789abcdef".into()),
             architecture: Some("qwen3".into()),
             quantization: Some("Q4_K_M".into()),
             launch_kind: SurveyLaunchKind::Startup,
@@ -2046,6 +2072,7 @@ mod tests {
     fn lifecycle_attributes_omit_model_values() {
         let attrs = SurveyAttributes::from_disabled_spec(SurveyModelSpec {
             model: "org/private-model:variant",
+            configured_model_selector: None,
             model_path: None,
             launch_kind: SurveyLaunchKind::Startup,
             pinned_gpu: None,
