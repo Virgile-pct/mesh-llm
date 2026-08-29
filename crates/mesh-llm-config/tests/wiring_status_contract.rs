@@ -202,11 +202,19 @@ fn builtin_schema_support_matches_structured_wiring_status() {
                 .iter()
                 .find(|entry| entry.path.trim_end_matches(".*") == path)
                 .unwrap_or_else(|| panic!("schema path {rendered} must have a wiring entry"));
-            let expected = match entry.status {
-                WiringStatus::Wired => ConfigSupportState::Supported,
-                WiringStatus::Partial => ConfigSupportState::Experimental,
-                WiringStatus::Unwired => ConfigSupportState::Unwired,
-                WiringStatus::Rejected => ConfigSupportState::Rejected,
+            let expected = match (entry.status, entry.behavior) {
+                (WiringStatus::Wired, WiringBehavior::None) => ConfigSupportState::Supported,
+                (WiringStatus::Partial, WiringBehavior::None) => ConfigSupportState::Experimental,
+                (WiringStatus::Unwired, WiringBehavior::BailsDownstream) => {
+                    ConfigSupportState::Unwired
+                }
+                (WiringStatus::Unwired, WiringBehavior::SilentNoOp) => {
+                    ConfigSupportState::Unsupported
+                }
+                (WiringStatus::Rejected, WiringBehavior::Rejected) => ConfigSupportState::Rejected,
+                combination => panic!(
+                    "wiring entry {path} has inconsistent status and behavior: {combination:?}"
+                ),
             };
             (setting.support != expected).then_some((rendered, setting.support, expected))
         })

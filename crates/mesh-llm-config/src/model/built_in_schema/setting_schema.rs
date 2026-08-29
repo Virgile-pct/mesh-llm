@@ -217,6 +217,19 @@ fn rejected_setting(
     setting
 }
 
+fn unwired_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSettingSchema {
+    let mut setting = basic_setting(path, value_schema);
+    setting.support = ConfigSupportState::Unwired;
+    setting
+}
+
+fn unsupported_setting(path: &str, value_schema: ConfigValueSchema) -> ConfigSettingSchema {
+    let mut setting = basic_setting(path, value_schema);
+    setting.support = ConfigSupportState::Unsupported;
+    setting.restart_scope = ConfigRestartScope::None;
+    setting
+}
+
 fn hidden_setting(
     path: &str,
     value_schema: ConfigValueSchema,
@@ -225,6 +238,17 @@ fn hidden_setting(
     let mut setting = basic_setting(path, value_schema);
     setting.visibility = ConfigVisibility::Hidden;
     setting.description = Some(description.to_string());
+    setting
+}
+
+fn hidden_unsupported_setting(
+    path: &str,
+    value_schema: ConfigValueSchema,
+    description: &str,
+) -> ConfigSettingSchema {
+    let mut setting = hidden_setting(path, value_schema, description);
+    setting.support = ConfigSupportState::Unsupported;
+    setting.restart_scope = ConfigRestartScope::None;
     setting
 }
 

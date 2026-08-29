@@ -162,7 +162,7 @@ one.
 
 | Key path | Type | Allowed values / default (`auto`) | `[defaults]` / `[[models]]` | Restart | Status | CLI equivalent |
 |---|---|---|---|---|---|---|
-| `hardware.model_runtime` | enum | `auto`, `cpu`, `cuda`, `rocm`, `metal`, `vulkan`; all rejected when set | both | model reload | rejected (selected by the installed native runtime and hardware resolver, not by config) | none |
+| `hardware.model_runtime` | enum | `auto`, `cpu`, `cuda`, `rocm`, `metal`, `vulkan`; all rejected when set | both | not applicable | rejected (selected by the installed native runtime and hardware resolver, not by config) | none |
 | `hardware.device` | string | unset (auto) | both | model reload | wired | `--device` |
 | `hardware.gpu_layers` | integer-or-`auto` | `auto`; `-1` means all where the backend supports it | both | model reload | wired | `--gpu-layers` |
 | `hardware.stage_layer_start`<br>`hardware.stage_layer_end` | integer | planner-generated unless pinned; `start >= 0`, `end > start` | both | model reload | wired (staged mode only) | none |
@@ -173,19 +173,19 @@ one.
 | `hardware.cpu_moe`<br>`hardware.n_cpu_moe` | bool-or-`auto` / integer | family or planner default | both | model reload | unwired | none |
 | `hardware.fit_target_mib` | integer | optional | both | model reload | wired (GPU tuner authors it and Skippy fit planning consumes it) | derived from allocatable memory when unset |
 | `hardware.safety_margin_gb` | float | not a saved key; documented mapping only | both | model reload | wired (feeds `fit_target_mib` derivation) | none |
-| `hardware.fit_context` | bool-or-`auto` | unsupported | both | model reload | rejected | none |
-| `hardware.lora_adapters` | array of string | unsupported | both | model reload | rejected | none |
-| `hardware.control_vectors` | array of string | unsupported | both | model reload | rejected | none |
+| `hardware.fit_context` | bool-or-`auto` | unsupported | both | not applicable | rejected | none |
+| `hardware.lora_adapters` | array of string | unsupported | both | not applicable | rejected | none |
+| `hardware.control_vectors` | array of string | unsupported | both | not applicable | rejected | none |
 | `hardware.check_tensors` | boolean | `false` | both | model reload | wired | none |
 | `hardware.mmap` | bool-or-`auto` | `auto` | both | model reload | wired | `--mmap` |
-| `hardware.use_mmap_prefetch` | boolean | unsupported | both | model reload | rejected (the native model loader does not consume it) | none |
-| `hardware.use_mmap_buffer` | boolean | unsupported | both | model reload | rejected (the native model loader does not consume it) | none |
+| `hardware.use_mmap_prefetch` | boolean | unsupported | both | not applicable | rejected (the native model loader does not consume it) | none |
+| `hardware.use_mmap_buffer` | boolean | unsupported | both | not applicable | rejected (the native model loader does not consume it) | none |
 | `hardware.mlock` | boolean | `false` | both | model reload | wired | `--mlock` |
 | `hardware.direct_io` | boolean | `false`; takes precedence over `mmap`/`mlock` when `true` | both | model reload | wired | none |
 | `hardware.repack` | boolean | `false` | both | model reload | wired | none |
 | `hardware.op_offload` | boolean | unset preserves llama.cpp's derived default (currently enabled); `false`/`true` force it | both | model reload | wired | none |
 | `hardware.no_host_buffer` | boolean | `false` | both | model reload | wired | none |
-| `hardware.warmup` | bool-or-`auto` | unsupported | both | model reload | rejected | none |
+| `hardware.warmup` | bool-or-`auto` | unsupported | both | not applicable | rejected | none |
 
 Missing TOML for this group: LoRA per-adapter scale, control-vector scale and
 layer range (`il_start`/`il_end`), RoPE/YaRN load-time overrides, and general
@@ -199,21 +199,21 @@ per-tensor device overrides. None of these has a schema key yet.
 | `throughput.continuous_batching` | bool-or-`auto` | `auto` | both | model reload | wired (disabled mode limits scheduler iterations to one active request; enabled/auto uses all configured lanes) | none |
 | `throughput.threads` | integer | `0` = auto from host CPU count | both | model reload | wired | `--threads` |
 | `throughput.threads_batch` | integer | `0` = defaults to `threads` | both | model reload | wired | none |
-| `throughput.priority` | integer-or-string | unsupported | both | model reload | rejected (no model-scoped scheduling or OS-priority consumer) | none |
-| `throughput.poll` | bool-or-enum | unsupported | both | model reload | rejected (the embedded runtime exposes no polling policy) | none |
-| `throughput.cpu_affinity` | string or list | unsupported | both | model reload | rejected (no inference-thread affinity consumer) | none |
-| `throughput.numa` | string | unsupported | both | model reload | rejected (the embedded runtime exposes no NUMA policy) | none |
-| `throughput.slot_prompt_similarity` | float | unsupported | both | model reload | rejected (Skippy prefix reuse has no similarity threshold) | none |
+| `throughput.priority` | integer-or-string | unsupported | both | not applicable | rejected (no model-scoped scheduling or OS-priority consumer) | none |
+| `throughput.poll` | bool-or-enum | unsupported | both | not applicable | rejected (the embedded runtime exposes no polling policy) | none |
+| `throughput.cpu_affinity` | string or list | unsupported | both | not applicable | rejected (no inference-thread affinity consumer) | none |
+| `throughput.numa` | string | unsupported | both | not applicable | rejected (the embedded runtime exposes no NUMA policy) | none |
+| `throughput.slot_prompt_similarity` | float | unsupported | both | not applicable | rejected (Skippy prefix reuse has no similarity threshold) | none |
 | `throughput.tuning_profile` | enum | `throughput`, `balanced` (default), `saver` | both | model reload | wired (expands batch, ubatch, parallel, and continuous batching) | none |
 
 ## Group 6: Skippy staged serving, transport, topology, and lifecycle
 
 | Key path | Type | Allowed values / default (`auto`) | `[defaults]` / `[[models]]` | Restart | Status | CLI equivalent |
 |---|---|---|---|---|---|---|
-| `skippy.stage_model_path` | path | unsupported | both | model reload | rejected (stage artifacts come from the verified model package) | none |
-| `skippy.stage_role` | string | unsupported | both | model reload | rejected (the typed planner derives stage roles) | none |
-| `skippy.stage_topology` | string | unsupported | both | model reload | rejected (issue #1052 owns typed per-model topology; untyped strings are not accepted) | none |
-| `skippy.binary_stage_transport` | string | unsupported | both | model reload | rejected (binary transport is the only staged transport and is selected automatically) | none |
+| `skippy.stage_model_path` | path | unsupported | both | not applicable | rejected (stage artifacts come from the verified model package) | none |
+| `skippy.stage_role` | string | unsupported | both | not applicable | rejected (the typed planner derives stage roles) | none |
+| `skippy.stage_topology` | string | unsupported | both | not applicable | rejected (issue #1052 owns typed per-model topology; untyped strings are not accepted) | none |
+| `skippy.binary_stage_transport` | string | unsupported | both | not applicable | rejected (binary transport is the only staged transport and is selected automatically) | none |
 | `skippy.lifecycle_startup_timeout_ms` | integer | `900000` ms | both | model reload | wired (bounds downstream stage load) | none |
 | `skippy.lifecycle_readiness_interval_ms`<br>`skippy.lifecycle_health_interval_ms` | integer | `2000` ms / `30000` ms | both | model reload | wired (controls source-readiness polling / coordinator health checks) | none |
 | `topology.mode` | enum | unset; `locked` when configured | both | model reload | wired (selects fail-closed locked planning) | none |
