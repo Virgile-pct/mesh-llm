@@ -115,7 +115,7 @@ fn expected_type_token(path: &str, schema: &ConfigValueSchema) -> Option<&'stati
         }
         ConfigValueSchema::Enum { .. } => Some("enum"),
         ConfigValueSchema::Array { .. } => Some("array"),
-        ConfigValueSchema::Object => Some("object"),
+        ConfigValueSchema::Object { .. } => Some("object"),
         ConfigValueSchema::OneOf { .. } => None,
     }
 }
