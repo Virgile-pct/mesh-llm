@@ -243,4 +243,5 @@ mod tests {
     use crate::{MeshConfig, validate_config, validate_config_diagnostics};
 
     include!("validate_gpu_tune_tests.rs");
+    include!("validate_tensor_split_tests.rs");
 }
