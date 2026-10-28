@@ -233,9 +233,56 @@ pub(super) async fn bind_runtime_tcp_listener(
     label: &str,
 ) -> Result<tokio::net::TcpListener> {
     let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
-    tokio::net::TcpListener::bind(format!("{addr}:{port}"))
+    bind_exclusive_tcp_listener(format!("{addr}:{port}"))
         .await
         .with_context(|| format!("Failed to bind {label} to port {port}"))
+}
+
+/// On Windows a wildcard listener and a loopback one can share a port unless
+/// the socket asks for exclusive use, and loopback clients then reach the more
+/// specific one: a node bound to `0.0.0.0:P` would report ready while local
+/// clients and its own console probe talk to whatever already holds
+/// `127.0.0.1:P`. `SO_EXCLUSIVEADDRUSE` makes that bind fail instead.
+#[cfg(windows)]
+async fn bind_exclusive_tcp_listener(addr: String) -> std::io::Result<tokio::net::TcpListener> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOL_SOCKET, setsockopt};
+
+    let addr = tokio::net::lookup_host(&addr)
+        .await?
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address to bind")
+        })?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    let exclusive: i32 = 1;
+    // SAFETY: a valid socket handle owned by `socket`, and a pointer to an
+    // i32 of the length passed, as SO_EXCLUSIVEADDRUSE expects.
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&exclusive as *const i32).cast(),
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(socket.into())
+}
+
+#[cfg(not(windows))]
+async fn bind_exclusive_tcp_listener(addr: String) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(addr).await
 }
 
 pub(super) fn startup_default_backend_device(

@@ -1031,6 +1031,35 @@ mod tests {
         }
     }
 
+    /// Windows lets a `0.0.0.0` listener share a port with a `127.0.0.1` one
+    /// and sends loopback to the more specific socket, so without exclusive
+    /// binds a `listen_all` worker would report ready while its own console
+    /// probe reached the foreign stub.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listen_all_startup_rejects_a_loopback_console_already_on_the_port() {
+        let stub = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind foreign loopback console");
+        let console_port = stub.local_addr().expect("foreign stub local addr").port();
+
+        let startup = start_embedded_serve(EmbeddedServeConfig {
+            mode: EmbeddedMeshNodeMode::Client,
+            api_port: free_local_port(),
+            console_port,
+            listen_all: true,
+            startup_timeout: Duration::from_secs(20),
+            ..EmbeddedServeConfig::default()
+        })
+        .await;
+
+        if let Ok(handle) = startup {
+            let _ = handle.stop().await;
+            panic!("a listen_all worker must not share its console port with a loopback listener");
+        }
+        drop(stub);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn embedded_startup_fails_when_api_port_is_occupied() {
         let api_stub = tokio::net::TcpListener::bind("127.0.0.1:0")
