@@ -22,8 +22,17 @@ fn dispatch_on_application_stack(cli: Cli) -> anyhow::Result<bool> {
 }
 
 fn parse_cli(args: &[&str]) -> Cli {
-    let normalized = mesh_llm_cli::normalize_runtime_surface_args(args.iter().copied());
-    Cli::try_parse_from(normalized.normalized).expect("load arguments should parse")
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    std::thread::Builder::new()
+        .stack_size(crate::DEFAULT_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let normalized =
+                mesh_llm_cli::normalize_runtime_surface_args(args.iter().map(String::as_str));
+            Cli::try_parse_from(normalized.normalized).expect("load arguments should parse")
+        })
+        .expect("spawn parse thread")
+        .join()
+        .expect("parse thread")
 }
 
 async fn read_request_body(stream: &mut TcpStream) -> Vec<u8> {
