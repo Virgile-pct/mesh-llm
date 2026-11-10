@@ -87,7 +87,17 @@ pub async fn route_model_request(
         peer_capsule_id: context.peer_capsule_id,
         served_by_node_id: context.served_by_node_id,
     };
-    route_model_request_inner(args).await
+    crate::network::openai::response::stream_resume::with_stream_resume(route_model_request_inner(
+        args,
+    ))
+    .await
+}
+
+/// End a caller's stream that was held open for a resume that did not happen.
+async fn close_held_stream(tcp_stream: &mut ClientStream) {
+    use tokio::io::AsyncWriteExt;
+    let _ = tcp_stream.write_all(b"0\r\n\r\n").await;
+    let _ = tcp_stream.shutdown().await;
 }
 
 struct RouteModelRequestArgs<'a> {
@@ -292,8 +302,11 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     // resolves the capsule client nonce once, before target selection), so every
     // attempt here — including a timeout retry to a different target — forwards
     // the identical nonce instead of letting each target's frontend mint its own.
-    let forwarding_raw = request.raw.as_slice();
+    // After a committed stream broke, the request rewritten to continue it.
+    let mut resumed_raw: Option<Vec<u8>> = None;
     for (idx, target) in ordered.into_iter().enumerate() {
+        let forwarding_raw = resumed_raw.as_deref().unwrap_or(request.raw.as_slice());
+        crate::network::openai::response::stream_resume::set_allowed(idx + 1 < total_targets);
         // A prior attempt in this same loop may have probed a response,
         // recorded ITS peer's `X-Capsule-Id` into the sink, and then still
         // been classified retryable (e.g. context overflow) -- drain that
@@ -367,6 +380,16 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
             total_route_ms = route_started.elapsed().as_millis(),
             "openai route_model_request attempt"
         );
+        if let Some(raw) = resume_after_attempt(&attempt_result, request.raw.as_slice()) {
+            tracing::info!(
+                model = model,
+                target = ?target,
+                attempt = state.attempts,
+                "openai route_model_request resuming a committed stream on the next target"
+            );
+            resumed_raw = Some(raw);
+            continue;
+        }
         match handle_route_model_attempt_result(
             &node,
             model,
@@ -392,6 +415,17 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
         }
     }
 
+    // A resume that found no target to commit: the caller's stream is open,
+    // so end it rather than writing a second response head into it.
+    if crate::network::openai::response::stream_resume::continuation().is_some() {
+        close_held_stream(&mut tcp_stream).await;
+        record_route_model_unavailable(&node, model, state.attempts);
+        return RouteDispatchOutcome::FailedWithStatus {
+            status_code: 200,
+            reason: "upstream_stream_incomplete",
+        };
+    }
+
     exhaustion::finish_exhausted_route_model_request(
         &node,
         tcp_stream,
@@ -401,6 +435,30 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
         route_observer,
     )
     .await
+}
+
+/// After a committed stream broke with another target left, the request that
+/// continues it there; `None` to handle the attempt as before.
+fn resume_after_attempt(attempt_result: &RouteAttemptResult, raw: &[u8]) -> Option<Vec<u8>> {
+    use crate::network::openai::response::stream_resume;
+    if !matches!(
+        attempt_result,
+        RouteAttemptResult::CommittedStreamFailure {
+            cause: crate::network::openai::response::CommittedStreamFailureCause::Truncated,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let delivered = stream_resume::take_delivered()?;
+    let resumed = stream_resume::resumed_request(raw, &delivered)?;
+    stream_resume::begin_continuation(stream_resume::StreamContinuation {
+        id: delivered.id,
+        created: delivered.created,
+        model: delivered.model,
+        prior_completion_chunks: delivered.content_chunks,
+    });
+    Some(resumed)
 }
 
 struct ReservedModelRoute {

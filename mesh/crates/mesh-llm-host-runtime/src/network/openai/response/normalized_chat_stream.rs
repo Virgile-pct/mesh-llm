@@ -1,6 +1,8 @@
 //! Client-facing chat SSE normalization. Billing watermarks remain on the peer transport.
 use super::normalized_stream_completion::finish_normalized_chat_stream;
 use super::*;
+use crate::network::openai::response::stream_resume;
+use serde_json::Value;
 
 fn observe_output_progress(observer: OpenAiRouteObserver<'_>, errored: bool, first: &mut bool) {
     if errored {
@@ -88,6 +90,20 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         return Ok(result);
     }
 
+    // A continuation writes into the caller's already open stream, so it can
+    // neither relay an error response nor a non-stream body into it.
+    let continuation = stream_resume::continuation();
+    if continuation.is_some() {
+        let streams = try_parse_response_headers(&probe.buffered)
+            .ok()
+            .flatten()
+            .is_some_and(|parsed| response_is_event_stream(&parsed));
+        if !(200..300).contains(&probe.status_code) || !streams {
+            return Ok(RouteAttemptResult::RetryableUnavailable);
+        }
+        stream_resume::finish_continuation();
+    }
+
     if !(200..300).contains(&probe.status_code) {
         route_observer.stream_error("upstream_status");
         return relay_error_response(
@@ -135,9 +151,14 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     append_mesh_served_by_header(&mut header, served_by);
     append_mesh_request_id_header(&mut header, request_id);
     header.push_str("Connection: close\r\n\r\n");
-    tcp_stream.write_all(header.as_bytes()).await?;
-    let mut response_capture = route_observer.begin_stream_response_capture();
-    route_observer.stream_started(None);
+    let mut response_capture = None;
+    if continuation.is_none() {
+        tcp_stream.write_all(header.as_bytes()).await?;
+        response_capture = route_observer.begin_stream_response_capture();
+        route_observer.stream_started(None);
+    }
+    let mut identity: Option<(Option<Value>, Option<Value>, Option<Value>)> = None;
+    let mut content_chunks = 0u32;
 
     let mut done_seen = false;
     let mut first_chunk_seen = false;
@@ -172,6 +193,29 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
                 observed_cache_cost.or_else(|| parse_cache_cost_from_json_body(data.as_bytes()));
             let normalized = state.normalize_data(&data);
             assembly.ingest_chunk(&normalized);
+            if let Ok(chunk) = serde_json::from_str::<Value>(&normalized) {
+                if identity.is_none() && chunk.get("choices").is_some() {
+                    identity = Some((
+                        chunk.get("id").cloned(),
+                        chunk.get("created").cloned(),
+                        chunk.get("model").cloned(),
+                    ));
+                }
+                let has_content = chunk
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty());
+                content_chunks += u32::from(has_content);
+            }
+            let normalized = match &continuation {
+                Some(continuation) => {
+                    match stream_resume::rewrite_continuation_chunk(&normalized, continuation) {
+                        Some(rewritten) => rewritten,
+                        None => continue,
+                    }
+                }
+                None => normalized,
+            };
             if hold_usage_frame(&normalized, &mut pending_usage) {
                 continue;
             }
@@ -187,7 +231,13 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         }
 
         let mut chunk = [0u8; 8192];
-        let n = reader.read(&mut chunk).await?;
+        let n = match reader.read(&mut chunk).await {
+            Ok(n) => n,
+            // The upstream broke: with another target left, the stream may
+            // still be resumed, so treat it like an early end.
+            Err(_) if stream_resume::allowed() => 0,
+            Err(error) => return Err(error.into()),
+        };
         if n == 0 {
             break;
         }
@@ -196,6 +246,29 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         if carry.contains('\r') {
             carry = carry.replace("\r\n", "\n");
         }
+    }
+
+    // Truncated with another target left: keep the caller's stream open and
+    // hand what it received to the route loop, which continues it elsewhere.
+    if !done_seen
+        && !upstream_error_seen
+        && stream_resume::allowed()
+        && assembly.resumable()
+        && !assembly.content().is_empty()
+    {
+        let (id, created, model) = identity.unwrap_or_default();
+        stream_resume::record_delivered(stream_resume::DeliveredStream {
+            content: assembly.content().to_string(),
+            content_chunks,
+            id,
+            created,
+            model,
+        });
+        route_observer.stream_error("upstream_stream_incomplete");
+        return Ok(RouteAttemptResult::CommittedStreamFailure {
+            status_code: 200,
+            cause: CommittedStreamFailureCause::Truncated,
+        });
     }
 
     flush_pending_usage(tcp_stream, &mut response_capture, &mut pending_usage).await?;
