@@ -67,6 +67,27 @@ pub(in crate::network::openai) fn allowed() -> bool {
     with(|state| state.allow).unwrap_or(false)
 }
 
+/// PROTOTYPE knob: how long a committed stream that already produced output
+/// may stay silent before it counts as lost and is resumed elsewhere.
+const IDLE_LIMIT_ENV: &str = "MESH_LLM_STREAM_RESUME_IDLE_SECS";
+const DEFAULT_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The idle limit, or `None` when it is turned off (`0`).
+pub(in crate::network::openai) fn idle_limit() -> Option<std::time::Duration> {
+    idle_limit_from(std::env::var(IDLE_LIMIT_ENV).ok().as_deref())
+}
+
+fn idle_limit_from(value: Option<&str>) -> Option<std::time::Duration> {
+    match value.map(str::trim) {
+        None | Some("") => Some(DEFAULT_IDLE_LIMIT),
+        Some(text) => match text.parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => Some(DEFAULT_IDLE_LIMIT),
+        },
+    }
+}
+
 pub(in crate::network::openai) fn record_delivered(delivered: DeliveredStream) {
     with(|state| state.delivered = Some(delivered));
 }
@@ -218,6 +239,15 @@ mod tests {
         assert_eq!(rewritten["id"], "chatcmpl-first");
         assert_eq!(rewritten["created"], 100);
         assert_eq!(rewritten["choices"][0]["delta"]["content"], "11");
+    }
+
+    #[test]
+    fn the_idle_limit_defaults_to_ten_seconds_and_zero_turns_it_off() {
+        use std::time::Duration;
+        assert_eq!(idle_limit_from(None), Some(Duration::from_secs(10)));
+        assert_eq!(idle_limit_from(Some("0")), None);
+        assert_eq!(idle_limit_from(Some(" 4 ")), Some(Duration::from_secs(4)));
+        assert_eq!(idle_limit_from(Some("soon")), Some(Duration::from_secs(10)));
     }
 
     #[test]

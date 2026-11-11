@@ -231,7 +231,27 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         }
 
         let mut chunk = [0u8; 8192];
-        let n = match reader.read(&mut chunk).await {
+        // Once output flows, a host that goes silent past the idle limit is
+        // treated as lost when another target can resume the stream: an
+        // abruptly killed peer is otherwise only noticed at the transport's
+        // idle timeout, tens of seconds later. Before the first content the
+        // host may still be prefilling, so no limit applies there.
+        let idle_limit =
+            stream_resume::idle_limit().filter(|_| content_chunks > 0 && stream_resume::allowed());
+        let read = match idle_limit {
+            Some(limit) => match tokio::time::timeout(limit, reader.read(&mut chunk)).await {
+                Ok(read) => read,
+                Err(_) => {
+                    tracing::info!(
+                        idle_ms = limit.as_millis(),
+                        "openai committed stream went silent past its idle limit"
+                    );
+                    Ok(0)
+                }
+            },
+            None => reader.read(&mut chunk).await,
+        };
+        let n = match read {
             Ok(n) => n,
             // The upstream broke: with another target left, the stream may
             // still be resumed, so treat it like an early end.
