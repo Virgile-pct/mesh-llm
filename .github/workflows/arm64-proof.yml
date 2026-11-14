@@ -82,6 +82,38 @@ jobs:
           }
           Get-ChildItem "$out\native-runtimes" | ForEach-Object { "runtime: $($_.Name)" }
 
+      - name: Diagnose the runtime libraries
+        shell: pwsh
+        run: |
+          "clang on PATH: $((Get-Command clang).Source)"; clang --version | Select-Object -First 1
+          $rt = Get-ChildItem 'target\aarch64-pc-windows-msvc\debug\native-runtimes' -Directory | Select-Object -First 1
+          Get-Content "$($rt.FullName)\manifest.json"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object FullName -like '*Hostarm64\arm64*' | Select-Object -First 1
+          foreach ($dll in Get-ChildItem "$($rt.FullName)\lib" -Filter *.dll) {
+            $e = & $dumpbin.FullName /exports $dll.FullName
+            "{0}: exports={1} skippy_={2} skippy_abi_version={3}" -f $dll.Name, @($e | Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s').Count, @($e | Select-String ' skippy_').Count, [bool]($e | Select-String -SimpleMatch ' skippy_abi_version')
+          }
+          Add-Type -Namespace W -Name K -MemberDefinition @'
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibraryExW(string p, IntPtr h, uint f);
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr m, string n);
+          '@
+          $lib = "$($rt.FullName)\lib\llama.dll"
+          $h = [W.K]::LoadLibraryExW($lib, [IntPtr]::Zero, 0x1100)
+          "LoadLibraryExW llama.dll: handle=$h error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          if ($h -ne [IntPtr]::Zero) {
+            $p = [W.K]::GetProcAddress($h, 'skippy_abi_version')
+            "GetProcAddress skippy_abi_version: $p error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          }
+
+      - name: Upload the runtime
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-runtime
+          path: target/aarch64-pc-windows-msvc/debug/native-runtimes/*.tar.gz
+          if-no-files-found: ignore
+
       - name: Run mesh-llm on ARM64
         shell: pwsh
         env:
