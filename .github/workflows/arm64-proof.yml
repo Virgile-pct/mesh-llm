@@ -1,0 +1,111 @@
+# Throwaway proof for Mesh-LLM/mesh-llm#3077, run only on the Virgile-pct fork:
+# build Windows ARM64 natively with build-windows.ps1 -TargetArch arm64, then run it.
+name: ARM64 proof
+
+on:
+  push:
+    branches: [arm64-proof]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    if: github.repository == 'Virgile-pct/mesh-llm'
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    env:
+      MESH_LLM_SKIP_UI: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inventory
+        shell: pwsh
+        run: |
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          foreach ($c in 'Microsoft.VisualStudio.Component.VC.Tools.ARM64', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang') {
+            "$c -> '$(& $vswhere -latest -products * -requires $c -property installationPath)'"
+          }
+          foreach ($t in 'rustup', 'cargo', 'cmake', 'ninja', 'clang', 'bash', 'node', 'pnpm', 'git') {
+            $cmd = Get-Command $t -ErrorAction SilentlyContinue
+            "{0,-7} {1}" -f $t, $(if ($cmd) { $cmd.Source } else { 'MISSING' })
+          }
+          rustc -vV
+
+      - name: Install what the image lacks
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $missing = @('Microsoft.VisualStudio.Component.VC.Tools.ARM64', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang') |
+            Where-Object { -not (& $vswhere -latest -products * -requires $_ -property installationPath) }
+          if ($missing) {
+            "Adding VS components: $($missing -join ', ')"
+            $add = $missing | ForEach-Object { '--add', $_ }
+            $p = Start-Process "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe" -ArgumentList (@('modify', '--installPath', "`"$vs`"") + $add + @('--quiet', '--norestart', '--nocache')) -Wait -PassThru
+            "VS installer exit $($p.ExitCode)"
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { python -m pip install --quiet ninja; "ninja: $((Get-Command ninja).Source)" }
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { throw "rustup missing from the image" }
+          rustup target add aarch64-pc-windows-msvc
+          rustup component add llvm-tools-preview
+
+      - name: build-windows.ps1 -Backend cpu -TargetArch arm64
+        shell: powershell
+        run: |
+          $started = Get-Date
+          .\scripts\build-windows.ps1 -Backend cpu -TargetArch arm64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "build minutes: $([int]((Get-Date) - $started).TotalMinutes)"
+
+      - name: Inspect outputs
+        shell: pwsh
+        run: |
+          $out = 'target\aarch64-pc-windows-msvc\debug'
+          Get-ChildItem $out -Filter *.exe | Where-Object Name -in 'mesh-llm.exe', 'skippy.exe' | ForEach-Object {
+            $b = [IO.File]::ReadAllBytes($_.FullName); $pe = [BitConverter]::ToInt32($b, 0x3C)
+            "{0} {1:N1} MB machine=0x{2:X4}" -f $_.Name, ($_.Length / 1MB), [BitConverter]::ToUInt16($b, $pe + 4)
+          }
+          Get-ChildItem "$out\native-runtimes" | ForEach-Object { "runtime: $($_.Name)" }
+
+      - name: Run mesh-llm on ARM64
+        shell: pwsh
+        env:
+          MESH_LLM_EPHEMERAL_KEY: "1"
+        run: |
+          $exe = (Resolve-Path 'target\aarch64-pc-windows-msvc\debug\mesh-llm.exe').Path
+          & $exe --version
+          & $exe gpus *>&1 | Tee-Object gpus.log
+          $key = Join-Path $env:RUNNER_TEMP 'no-such-owner.key'
+          $node = Start-Process $exe -ArgumentList @('serve', '--model', 'unsloth/Qwen3-0.6B-GGUF:Q4_K_M', '--headless', '--owner-key', $key) -RedirectStandardOutput serve.out -RedirectStandardError serve.err -PassThru -NoNewWindow
+          $started = Get-Date
+          $ready = $false
+          while (((Get-Date) - $started).TotalMinutes -lt 20 -and -not $node.HasExited) {
+            try { $m = Invoke-RestMethod http://127.0.0.1:9337/v1/models -TimeoutSec 5; if ($m.data.Count -gt 0) { $ready = $true; break } } catch {}
+            Start-Sleep -Seconds 5
+          }
+          "ready=$ready after $([int]((Get-Date) - $started).TotalSeconds) s, exited=$($node.HasExited)"
+          if ($ready) {
+            $body = @{ model = $m.data[0].id; max_tokens = 16; messages = @(@{ role = 'user'; content = 'Say hello in five words.' }) } | ConvertTo-Json -Depth 5
+            $t0 = Get-Date
+            $r = Invoke-RestMethod http://127.0.0.1:9337/v1/chat/completions -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 300
+            "completion in $([int]((Get-Date) - $t0).TotalSeconds) s: $($r.choices[0].message.content)"
+            "usage: $($r.usage | ConvertTo-Json -Compress)"
+          }
+          if (-not $node.HasExited) { Stop-Process -Id $node.Id -Force }
+          "--- serve.err (tail)"; Get-Content serve.err -Tail 60
+          if (-not $ready) { exit 1 }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-proof-logs
+          path: |
+            gpus.log
+            serve.out
+            serve.err
+          if-no-files-found: ignore
