@@ -106,6 +106,28 @@ jobs:
             "GetProcAddress skippy_abi_version: $p error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
           }
 
+      - name: Replay the host's load sequence
+        shell: pwsh
+        run: |
+          "DLLs next to mesh-llm.exe:"; Get-ChildItem 'target\aarch64-pc-windows-msvc\debug' -Filter *.dll | ForEach-Object { "  $($_.Name)" }
+          $rt = (Get-ChildItem 'target\aarch64-pc-windows-msvc\debug\native-runtimes' -Directory | Select-Object -First 1).FullName
+          $libs = (Get-Content "$rt\manifest.json" -Raw | ConvertFrom-Json).runtime.libraries
+          Add-Type -Namespace W -Name K -MemberDefinition @'
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibraryExW(string p, IntPtr h, uint f);
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr m, string n);
+          '@
+          $handles = @()
+          foreach ($l in $libs) {
+            $p = (Join-Path $rt $l).Replace('/', '\')
+            $h = [W.K]::LoadLibraryExW($p, [IntPtr]::Zero, 0x8)
+            "load $l (LOAD_WITH_ALTERED_SEARCH_PATH): handle=$h error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            $handles += , @($l, $h)
+          }
+          [array]::Reverse($handles)
+          foreach ($e in $handles) { "GetProcAddress($($e[0]), skippy_abi_version) = $([W.K]::GetProcAddress($e[1], 'skippy_abi_version'))" }
+          "Loaded llama/ggml/mtmd modules:"
+          [Diagnostics.Process]::GetCurrentProcess().Modules | Where-Object { $_.ModuleName -match '^(llama|ggml|mtmd)' } | ForEach-Object { "  $($_.ModuleName) <- $($_.FileName)" }
+
       - name: Upload the runtime
         if: always()
         uses: actions/upload-artifact@v4
@@ -140,6 +162,9 @@ jobs:
           }
           if (-not $node.HasExited) { Stop-Process -Id $node.Id -Force }
           "--- serve.err (tail)"; Get-Content serve.err -Tail 60
+          "--- runtime manifests the host can see after serve"
+          Get-ChildItem $env:LOCALAPPDATA, $env:USERPROFILE -Recurse -Filter manifest.json -ErrorAction SilentlyContinue -Depth 6 | Where-Object FullName -match 'native-runtime' | ForEach-Object { "  $($_.FullName)" }
+          & $exe runtime --help *>&1 | Select-Object -First 25
           if (-not $ready) { exit 1 }
 
       - name: Upload logs
