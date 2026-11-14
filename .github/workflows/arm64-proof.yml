@@ -55,7 +55,8 @@ jobs:
           # The repository's cargo config wraps rustc in sccache.
           $base = 'https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-pc-windows-msvc'
           Invoke-WebRequest "$base.zip" -OutFile sccache.zip
-          $expected = ((Invoke-WebRequest "$base.zip.sha256").Content.ToString().Trim() -split '\s+')[0]
+          Invoke-WebRequest "$base.zip.sha256" -OutFile sccache.zip.sha256
+          $expected = ((Get-Content sccache.zip.sha256 -Raw).Trim() -split '\s+')[0]
           $actual = (Get-FileHash sccache.zip -Algorithm SHA256).Hash
           if ($actual -ne $expected) { throw "sccache checksum mismatch: $actual != $expected" }
           Expand-Archive sccache.zip -DestinationPath "$env:RUNNER_TEMP\sccache"
