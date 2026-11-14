@@ -52,6 +52,16 @@ jobs:
           if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { throw "rustup missing from the image" }
           rustup target add aarch64-pc-windows-msvc
           rustup component add llvm-tools-preview
+          # The repository's cargo config wraps rustc in sccache.
+          $base = 'https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-pc-windows-msvc'
+          Invoke-WebRequest "$base.zip" -OutFile sccache.zip
+          $expected = ((Invoke-WebRequest "$base.zip.sha256").Content.ToString().Trim() -split '\s+')[0]
+          $actual = (Get-FileHash sccache.zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "sccache checksum mismatch: $actual != $expected" }
+          Expand-Archive sccache.zip -DestinationPath "$env:RUNNER_TEMP\sccache"
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\sccache" -Recurse -Filter sccache.exe | Select-Object -First 1
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "sccache: $($exe.FullName) sha256 ok"
 
       - name: build-windows.ps1 -Backend cpu -TargetArch arm64
         shell: powershell
