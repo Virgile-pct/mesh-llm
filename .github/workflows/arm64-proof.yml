@@ -103,6 +103,9 @@ jobs:
       - name: Verify the runtime package
         shell: bash
         run: |
+          # The image has no just, so the automation binary is built and named.
+          cargo build -p xtask
+          export MESH_LLM_AUTOMATION_BIN="$CARGO_TARGET_DIR\\debug\\xtask.exe"
           bash skippy/scripts/verify-native-runtime-package.sh --expected-backend cpu --expected-target aarch64-pc-windows-msvc "$(cygpath -u "$RUNTIME_DIR")"
 
       - name: Speech recognition is built into the packaged llama.dll
