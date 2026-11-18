@@ -1,0 +1,50 @@
+# Throwaway check for a review comment on Mesh-LLM/mesh-llm#3077, run only on
+# the Virgile-pct fork: on Windows x64, build and run the host xtask cold
+# inside the MSVC environment that targets ARM64, as build-windows.ps1 does
+# before it packages an ARM64 runtime without MESH_LLM_AUTOMATION_BIN.
+name: xtask in the ARM64 environment
+
+on:
+  push:
+    branches: [xtask-arm64-env]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xtask-cold:
+    if: github.repository == 'Virgile-pct/mesh-llm'
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run xtask cold in the amd64_arm64 environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $vs) { throw "no ARM64 MSVC tools on this image" }
+          # The import build-windows.ps1 makes: every variable vcvarsall sets.
+          $output = & cmd.exe /d /s /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" amd64_arm64 >nul && set"
+          foreach ($line in $output) {
+            if ($line -match '^(?<name>[^=]+)=(?<value>.+)$') { Set-Item -Path "env:$($Matches.name)" -Value $Matches.value }
+          }
+          "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
+          "first link on PATH: $((Get-Command link -CommandType Application | Select-Object -First 1).Source)"
+          "LIB:"; $env:LIB -split ';' | Where-Object { $_ } | ForEach-Object { "  $_" }
+          if ($env:VSCMD_ARG_TGT_ARCH -ne 'arm64') { throw "not an ARM64 environment" }
+          if (($env:LIB -split ';') -match '\\lib\\x64') { throw "LIB still lists x64 libraries" }
+          Remove-Item env:MESH_LLM_AUTOMATION_BIN -ErrorAction SilentlyContinue
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'xtask-target'
+          $ErrorActionPreference = 'Continue'
+          cargo --config "build.rustc-wrapper=''" xtool native package-source-version runtime skippy/crates/skippy-native-runtime/RUNTIME_VERSION
+          $code = $LASTEXITCODE
+          "cargo xtool exit $code"
+          if ($code -ne 0) { exit $code }
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'debug\xtask.exe'
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          "xtask.exe machine: 0x{0:X4}" -f [BitConverter]::ToUInt16($bytes, $pe + 4)
