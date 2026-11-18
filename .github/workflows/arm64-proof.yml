@@ -74,7 +74,11 @@ jobs:
         shell: powershell
         run: |
           $started = Get-Date
-          .\scripts\build-windows.ps1 *>&1 | Tee-Object build.log
+          # Redirecting the script's streams would turn a native tool's stderr
+          # into a terminating error under Windows PowerShell; a transcript
+          # keeps the script's own messages instead.
+          Start-Transcript -Path build.log | Out-Null
+          try { .\scripts\build-windows.ps1 } finally { Stop-Transcript | Out-Null }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "build minutes: $([int]((Get-Date) - $started).TotalMinutes)"
           if (-not (Select-String -Path build.log -SimpleMatch 'Using Windows backend: cpu (arm64)' -Quiet)) { throw 'the build did not default to the cpu backend for arm64' }
@@ -180,15 +184,18 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          # Only cargo is stubbed: metadata runs for real, builds report the
-          # MSVC environment they would have compiled with.
+          # Only cargo build is stubbed: every other cargo command runs for
+          # real, and a build records the MSVC environment it would have
+          # compiled with.
           $realCargo = (Get-Command cargo -CommandType Application | Select-Object -First 1).Source
+          $global:stubLog = Join-Path $env:RUNNER_TEMP 'stub-cargo.log'
           function global:cargo {
-            if ($args[0] -eq 'metadata') { & $realCargo @args; return }
+            if ($args[0] -ne 'build') { & $realCargo @args; return }
             $link = (Get-Command link -CommandType Application | Select-Object -First 1).Source
-            Write-Host "stub cargo: VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH LLAMA_STAGE_BUILD_DIR=$env:LLAMA_STAGE_BUILD_DIR link=$link args=$($args -join ' ')"
+            Add-Content -LiteralPath $global:stubLog -Value "stub cargo: VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH LLAMA_STAGE_BUILD_DIR=$env:LLAMA_STAGE_BUILD_DIR link=$link args=$($args -join ' ')"
             $global:LASTEXITCODE = 0
           }
+          function Last-StubLine { $line = @(Get-Content -LiteralPath $global:stubLog)[-1]; Write-Host $line; $line }
           # A Vulkan SDK on the machine must not stop the backend-neutral host.
           $env:VULKAN_SDK = Join-Path $env:RUNNER_TEMP 'FakeVulkanSDK'
           New-Item -ItemType Directory -Force $env:VULKAN_SDK | Out-Null
@@ -201,9 +208,9 @@ jobs:
           }
 
           $before = Snapshot
-          & .\mesh\scripts\build-windows.ps1 -TargetArch arm64 -HostOnly *>&1 | Tee-Object -Variable arm64 | Out-Host
+          & .\mesh\scripts\build-windows.ps1 -TargetArch arm64 -HostOnly
           Assert-Unchanged $before 'the ARM64 build'
-          $arm64Line = @($arm64 | Where-Object { "$_" -like 'stub cargo:*' })[-1]
+          $arm64Line = Last-StubLine
           if ("$arm64Line" -notmatch 'VSCMD_ARG_TGT_ARCH=arm64 ' -or "$arm64Line" -notmatch '--target aarch64-pc-windows-msvc') { throw "the ARM64 build did not use the ARM64 environment: $arm64Line" }
 
           # A shell left initialized for ARM64 by the caller, as a build that
@@ -214,9 +221,9 @@ jobs:
           "caller shell now targets: $env:VSCMD_ARG_TGT_ARCH"
 
           $before = Snapshot
-          & .\mesh\scripts\build-windows.ps1 -HostOnly *>&1 | Tee-Object -Variable x64 | Out-Host
+          & .\mesh\scripts\build-windows.ps1 -HostOnly
           Assert-Unchanged $before 'the x64 build'
-          $x64Line = @($x64 | Where-Object { "$_" -like 'stub cargo:*' })[-1]
+          $x64Line = Last-StubLine
           if ("$x64Line" -notmatch 'VSCMD_ARG_TGT_ARCH=x64 ' -or "$x64Line" -match '--target') { throw "the x64 build did not use the x64 environment: $x64Line" }
           if ("$x64Line" -notmatch '\\Hostx64\\x64\\link\.exe') { throw "the x64 build linked with another linker: $x64Line" }
           'ARM64 then x64 in one session: each build used its own environment'
