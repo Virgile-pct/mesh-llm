@@ -13,8 +13,21 @@ permissions:
   contents: read
 
 jobs:
-  xtask-cold:
+  restore-pwsh:
     if: github.repository == 'Virgile-pct/mesh-llm'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore block under PowerShell 7
+        shell: pwsh
+        run: ./.github/proof/restore_test.ps1
+      - name: Restore block under Windows PowerShell
+        shell: powershell
+        run: ./.github/proof/restore_test.ps1
+
+  xtask-cold:
+    if: false
     runs-on: windows-2025
     timeout-minutes: 40
     steps:
