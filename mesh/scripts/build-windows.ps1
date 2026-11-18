@@ -534,7 +534,9 @@ function Import-CmdEnvironment {
     }
 
     foreach ($line in $output) {
-        if ($line -match '^(?<name>[^=]+)=(?<value>.*)$') {
+        # `set` also lists variables set to an empty string; writing one back
+        # would remove it, since Windows cannot set an empty value.
+        if ($line -match '^(?<name>[^=]+)=(?<value>.+)$') {
             Set-Item -Path "env:$($Matches.name)" -Value $Matches.value
         }
     }
