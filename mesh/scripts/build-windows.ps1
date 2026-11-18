@@ -1496,16 +1496,22 @@ Invoke-InRepo {
     }
 }
 } finally {
-    # Only what the build changed is written back: on Windows, writing an
-    # empty value removes the variable, and a caller can hold variables set
-    # to an empty string (GitHub Actions runners do).
-    foreach ($name in @(Get-ChildItem env: | ForEach-Object { $_.Name })) {
+    # Only what the build changed is written back, compared against the
+    # environment as listed, which keeps variables set to an empty string
+    # (GitHub Actions runners have some): writing an empty value would
+    # remove them.
+    $buildEnvironment = @{}
+    foreach ($variable in Get-ChildItem env:) {
+        $buildEnvironment[$variable.Name] = $variable.Value
+    }
+    foreach ($name in $buildEnvironment.Keys) {
         if (-not $callerEnvironment.ContainsKey($name)) {
             [System.Environment]::SetEnvironmentVariable($name, $null, "Process")
         }
     }
     foreach ($entry in $callerEnvironment.GetEnumerator()) {
-        if ([System.Environment]::GetEnvironmentVariable($entry.Key, "Process") -cne $entry.Value) {
+        $unchanged = $buildEnvironment.ContainsKey($entry.Key) -and $buildEnvironment[$entry.Key] -ceq $entry.Value
+        if (-not $unchanged -and $entry.Value) {
             [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
         }
     }
