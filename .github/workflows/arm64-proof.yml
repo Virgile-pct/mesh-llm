@@ -1,0 +1,222 @@
+# Throwaway proof for Mesh-LLM/mesh-llm#3077, run only on the Virgile-pct fork.
+# The branch is #3077 with #3091 (speech recognition) on top.
+#
+# windows-arm64: on Windows ARM64, build-windows.ps1 with no -Backend and no
+# -TargetArch, a Vulkan SDK present and CARGO_TARGET_DIR outside the
+# checkout; verify the runtime package (PE machine of every DLL), read its
+# speech recognition capability bit, list the runtimes the host discovers,
+# then serve a model and complete a chat request.
+#
+# environment-isolation: on Windows x64, an ARM64 build then an x64 build in
+# one PowerShell session, cargo stubbed out: the first must leave the
+# session's environment as it found it, and the second must use x64 tools.
+name: ARM64 proof
+
+on:
+  push:
+    branches: [arm64-proof-2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    if: github.repository == 'Virgile-pct/mesh-llm'
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    env:
+      MESH_LLM_SKIP_UI: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install what the image lacks
+        shell: pwsh
+        run: |
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $missing = @('Microsoft.VisualStudio.Component.VC.Tools.ARM64', 'Microsoft.VisualStudio.Component.VC.Llvm.Clang') |
+            Where-Object { -not (& $vswhere -latest -products * -requires $_ -property installationPath) }
+          if ($missing) {
+            "Adding VS components: $($missing -join ', ')"
+            $add = $missing | ForEach-Object { '--add', $_ }
+            $p = Start-Process "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe" -ArgumentList (@('modify', '--installPath', "`"$vs`"") + $add + @('--quiet', '--norestart', '--nocache')) -Wait -PassThru
+            "VS installer exit $($p.ExitCode)"
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { python -m pip install --quiet ninja; "ninja: $((Get-Command ninja).Source)" }
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { throw "rustup missing from the image" }
+          rustup target add aarch64-pc-windows-msvc
+          rustup component add llvm-tools-preview
+          $base = 'https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-pc-windows-msvc'
+          Invoke-WebRequest "$base.zip" -OutFile sccache.zip
+          Invoke-WebRequest "$base.zip.sha256" -OutFile sccache.zip.sha256
+          $expected = ((Get-Content sccache.zip.sha256 -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash sccache.zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "sccache checksum mismatch: $actual != $expected" }
+          Expand-Archive sccache.zip -DestinationPath "$env:RUNNER_TEMP\sccache"
+          $exe = Get-ChildItem "$env:RUNNER_TEMP\sccache" -Recurse -Filter sccache.exe | Select-Object -First 1
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Put Cargo's target directory outside the checkout and fake a Vulkan SDK
+        shell: pwsh
+        run: |
+          $drive = if (Test-Path 'D:\') { 'D:\' } else { $env:RUNNER_TEMP }
+          $target = Join-Path $drive 'cargo-target'
+          $vulkan = Join-Path $env:RUNNER_TEMP 'FakeVulkanSDK\1.4.0.0'
+          New-Item -ItemType Directory -Force $target, $vulkan | Out-Null
+          "CARGO_TARGET_DIR=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VULKAN_SDK=$vulkan" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_TARGET_DIR=$target  VULKAN_SDK=$vulkan"
+
+      - name: build-windows.ps1 with no -Backend and no -TargetArch
+        shell: powershell
+        run: |
+          $started = Get-Date
+          .\scripts\build-windows.ps1 *>&1 | Tee-Object build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "build minutes: $([int]((Get-Date) - $started).TotalMinutes)"
+          if (-not (Select-String -Path build.log -SimpleMatch 'Using Windows backend: cpu (arm64)' -Quiet)) { throw 'the build did not default to the cpu backend for arm64' }
+
+      - name: Outputs are in Cargo's target directory and built for ARM64
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:CARGO_TARGET_DIR 'aarch64-pc-windows-msvc\debug'
+          foreach ($name in 'mesh-llm.exe', 'skippy.exe') {
+            $path = Join-Path $out $name
+            $b = [IO.File]::ReadAllBytes($path); $pe = [BitConverter]::ToInt32($b, 0x3C)
+            $machine = [BitConverter]::ToUInt16($b, $pe + 4)
+            "{0} {1:N1} MB machine=0x{2:X4}" -f $name, ((Get-Item $path).Length / 1MB), $machine
+            if ($machine -ne 0xAA64) { throw "$name is not ARM64" }
+          }
+          $runtimes = @(Get-ChildItem (Join-Path $out 'native-runtimes') -Directory)
+          if ($runtimes.Count -eq 0) { throw 'no native runtime next to mesh-llm.exe' }
+          $runtimes | ForEach-Object { "runtime: $($_.FullName)" }
+          if (Test-Path 'target\aarch64-pc-windows-msvc\debug\native-runtimes') { throw 'native-runtimes was staged under the checkout' }
+          "RUNTIME_DIR=$($runtimes[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify the runtime package
+        shell: bash
+        run: |
+          bash skippy/scripts/verify-native-runtime-package.sh --expected-backend cpu --expected-target aarch64-pc-windows-msvc "$(cygpath -u "$RUNTIME_DIR")"
+
+      - name: Speech recognition is built into the packaged llama.dll
+        shell: pwsh
+        run: |
+          Add-Type -Namespace W -Name K -MemberDefinition @'
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibraryExW(string p, IntPtr h, uint f);
+          [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr m, string n);
+          [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate ulong Features();
+          '@
+          $lib = Join-Path $env:RUNTIME_DIR 'lib\llama.dll'
+          # LOAD_WITH_ALTERED_SEARCH_PATH: the DLL's own directory resolves its imports.
+          $handle = [W.K]::LoadLibraryExW($lib, [IntPtr]::Zero, 0x8)
+          if ($handle -eq [IntPtr]::Zero) { throw "LoadLibraryExW failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+          $proc = [W.K]::GetProcAddress($handle, 'skippy_abi_features')
+          if ($proc -eq [IntPtr]::Zero) { throw 'llama.dll does not export skippy_abi_features' }
+          $features = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($proc, [W.K+Features]).Invoke()
+          $speech = ($features -band ([uint64]1 -shl 41)) -ne 0
+          "skippy_abi_features = 0x{0:X16}; SKIPPY_FEATURE_SPEECH_RECOGNITION (bit 41) = {1}" -f $features, $speech
+          if (-not $speech) { throw 'the ARM64 runtime was built without speech recognition' }
+
+      - name: Runtimes the host discovers
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'aarch64-pc-windows-msvc\debug\mesh-llm.exe'
+          & $exe --version
+          & $exe runtime list --installed *>&1 | Tee-Object runtime-list.log
+          & $exe runtime list --installed --json *>&1 | Tee-Object runtime-list.json
+
+      - name: Serve a model on ARM64
+        shell: pwsh
+        env:
+          MESH_LLM_EPHEMERAL_KEY: "1"
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'aarch64-pc-windows-msvc\debug\mesh-llm.exe'
+          $key = Join-Path $env:RUNNER_TEMP 'no-such-owner.key'
+          $node = Start-Process $exe -ArgumentList @('serve', '--model', 'unsloth/Qwen3-0.6B-GGUF:Q4_K_M', '--headless', '--owner-key', $key) -RedirectStandardOutput serve.out -RedirectStandardError serve.err -PassThru -NoNewWindow
+          $started = Get-Date
+          $ready = $false
+          while (((Get-Date) - $started).TotalMinutes -lt 20 -and -not $node.HasExited) {
+            try { $m = Invoke-RestMethod http://127.0.0.1:9337/v1/models -TimeoutSec 5; if ($m.data.Count -gt 0) { $ready = $true; break } } catch {}
+            Start-Sleep -Seconds 5
+          }
+          "ready=$ready after $([int]((Get-Date) - $started).TotalSeconds) s, exited=$($node.HasExited)"
+          if ($ready) {
+            $body = @{ model = $m.data[0].id; max_tokens = 16; messages = @(@{ role = 'user'; content = 'Say hello in five words.' }) } | ConvertTo-Json -Depth 5
+            $t0 = Get-Date
+            $r = Invoke-RestMethod http://127.0.0.1:9337/v1/chat/completions -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 300
+            "completion in $([int]((Get-Date) - $t0).TotalSeconds) s: $($r.choices[0].message.content)"
+            "usage: $($r.usage | ConvertTo-Json -Compress)"
+          }
+          if (-not $node.HasExited) { Stop-Process -Id $node.Id -Force }
+          "--- serve.err (tail)"; Get-Content serve.err -Tail 40
+          if (-not $ready) { exit 1 }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-proof-logs
+          path: |
+            build.log
+            runtime-list.log
+            runtime-list.json
+            serve.out
+            serve.err
+          if-no-files-found: ignore
+
+  environment-isolation:
+    if: github.repository == 'Virgile-pct/mesh-llm'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      MESH_LLM_SKIP_UI: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: An ARM64 build then an x64 build in one PowerShell session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Only cargo is stubbed: metadata runs for real, builds report the
+          # MSVC environment they would have compiled with.
+          $realCargo = (Get-Command cargo -CommandType Application | Select-Object -First 1).Source
+          function global:cargo {
+            if ($args[0] -eq 'metadata') { & $realCargo @args; return }
+            $link = (Get-Command link -CommandType Application | Select-Object -First 1).Source
+            Write-Host "stub cargo: VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH LLAMA_STAGE_BUILD_DIR=$env:LLAMA_STAGE_BUILD_DIR link=$link args=$($args -join ' ')"
+            $global:LASTEXITCODE = 0
+          }
+          # A Vulkan SDK on the machine must not stop the backend-neutral host.
+          $env:VULKAN_SDK = Join-Path $env:RUNNER_TEMP 'FakeVulkanSDK'
+          New-Item -ItemType Directory -Force $env:VULKAN_SDK | Out-Null
+          function Snapshot { $s = @{}; foreach ($v in Get-ChildItem env:) { $s[$v.Name] = $v.Value }; $s }
+          function Assert-Unchanged($before, $label) {
+            $after = Snapshot
+            $changed = @($before.Keys + $after.Keys | Sort-Object -Unique | Where-Object { $before[$_] -ne $after[$_] })
+            if ($changed) { throw "$label left the session environment changed: $($changed -join ', ')" }
+            "$label left the session environment unchanged ($($after.Count) variables)"
+          }
+
+          $before = Snapshot
+          & .\mesh\scripts\build-windows.ps1 -TargetArch arm64 -HostOnly *>&1 | Tee-Object -Variable arm64 | Out-Host
+          Assert-Unchanged $before 'the ARM64 build'
+          $arm64Line = @($arm64 | Where-Object { "$_" -like 'stub cargo:*' })[-1]
+          if ("$arm64Line" -notmatch 'VSCMD_ARG_TGT_ARCH=arm64 ' -or "$arm64Line" -notmatch '--target aarch64-pc-windows-msvc') { throw "the ARM64 build did not use the ARM64 environment: $arm64Line" }
+
+          # A shell left initialized for ARM64 by the caller, as a build that
+          # leaked its environment would have left it.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $vcvarsall = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+          foreach ($line in (& cmd.exe /s /c "`"$vcvarsall`" amd64_arm64 >nul && set")) { if ($line -match '^([^=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] } }
+          "caller shell now targets: $env:VSCMD_ARG_TGT_ARCH"
+
+          $before = Snapshot
+          & .\mesh\scripts\build-windows.ps1 -HostOnly *>&1 | Tee-Object -Variable x64 | Out-Host
+          Assert-Unchanged $before 'the x64 build'
+          $x64Line = @($x64 | Where-Object { "$_" -like 'stub cargo:*' })[-1]
+          if ("$x64Line" -notmatch 'VSCMD_ARG_TGT_ARCH=x64 ' -or "$x64Line" -match '--target') { throw "the x64 build did not use the x64 environment: $x64Line" }
+          if ("$x64Line" -notmatch '\\Hostx64\\x64\\link\.exe') { throw "the x64 build linked with another linker: $x64Line" }
+          'ARM64 then x64 in one session: each build used its own environment'
