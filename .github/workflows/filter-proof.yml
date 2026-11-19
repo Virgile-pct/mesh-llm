@@ -1,0 +1,46 @@
+name: windows-unit filter proof
+on:
+  push:
+    branches: [windows-unit-filter-proof]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: windows-2025
+    steps:
+      - name: Check out mesh-llm main
+        uses: actions/checkout@v4
+        with:
+          repository: Mesh-LLM/mesh-llm
+          ref: main
+          fetch-depth: 1
+      - name: Replay the windows-unit owner filter
+        shell: bash
+        env:
+          WINDOWS_CRATES: '["mesh-llm-config", "mesh-llm-events", "skippy-cli"]'
+        run: |
+          set -euo pipefail
+          echo "jq: $(command -v jq) $(jq --version)"
+          echo "grep: $(command -v grep) $(grep --version | head -1)"
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
+          jq -r '.packages[].name' "$RUNNER_TEMP/workspace-metadata.json" > "$RUNNER_TEMP/workspace-members.txt"
+          echo "--- members file, first two lines as bytes"
+          head -2 "$RUNNER_TEMP/workspace-members.txt" | od -c | head -4
+          echo "--- requested names as bytes"
+          jq -r '.[]' <<<"$WINDOWS_CRATES" | od -c | head -4
+          mapfile -t requested < <(jq -r '.[]' <<<"$WINDOWS_CRATES")
+          for crate in "${requested[@]}"; do
+            if grep -qxF -- "$crate" "$RUNNER_TEMP/workspace-members.txt"; then
+              echo "kept    $(printf '%q' "$crate")"
+            else
+              echo "SKIPPED $(printf '%q' "$crate")"
+            fi
+            if grep -qxF -- "${crate%$'\r'}" "$RUNNER_TEMP/workspace-members.txt"; then
+              echo "   without a trailing CR: kept"
+            else
+              echo "   without a trailing CR: still skipped"
+            fi
+          done
+          echo "--- is the member listed at all"
+          grep -n -- "mesh-llm-config" "$RUNNER_TEMP/workspace-members.txt" | od -c | head -3 || echo "no match"
