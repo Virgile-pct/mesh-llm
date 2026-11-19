@@ -2,45 +2,77 @@ name: windows-unit filter proof
 on:
   push:
     branches: [windows-unit-filter-proof]
-  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   proof:
     runs-on: windows-2025
     steps:
-      - name: Check out mesh-llm main
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: Mesh-LLM/mesh-llm
           ref: main
           fetch-depth: 1
-      - name: Replay the windows-unit owner filter
+      - name: Run the fixed filter step verbatim
+        id: windows_test_packages
         shell: bash
         env:
-          WINDOWS_CRATES: '["mesh-llm-config", "mesh-llm-events", "skippy-cli"]'
+          SHARED_CRATES: '["skippy-model-artifact", "mesh-llm-host-runtime", "mesh-llm-skippy-adapter", "mesh-llm-control-api", "mesh-llm-membership", "mesh-llm-transport", "mesh-llm"]'
+          WINDOWS_CRATES: '["mesh-llm-analytics", "mesh-llm-config", "mesh-llm-events", "mesh-llm-identity", "mesh-llm-payments", "mesh-llm-plugin", "mesh-llm-plugin-manager", "mesh-llm-routing", "mesh-llm-tui", "mesh-llm-ui", "mesh-llm-wallet", "process-supervision", "skippy-cache"]'
+          WINDOWS_DYNAMIC_CRATES: '["mesh-llm-commands", "mesh-llm-system", "not-a-member"]'
         run: |
           set -euo pipefail
-          echo "jq: $(command -v jq) $(jq --version)"
-          echo "grep: $(command -v grep) $(grep --version | head -1)"
-          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
-          jq -r '.packages[].name' "$RUNNER_TEMP/workspace-metadata.json" > "$RUNNER_TEMP/workspace-members.txt"
-          echo "--- members file, first two lines as bytes"
-          head -2 "$RUNNER_TEMP/workspace-members.txt" | od -c | head -4
-          echo "--- requested names as bytes"
-          jq -r '.[]' <<<"$WINDOWS_CRATES" | od -c | head -4
-          mapfile -t requested < <(jq -r '.[]' <<<"$WINDOWS_CRATES")
-          for crate in "${requested[@]}"; do
-            if grep -qxF -- "$crate" "$RUNNER_TEMP/workspace-members.txt"; then
-              echo "kept    $(printf '%q' "$crate")"
-            else
-              echo "SKIPPED $(printf '%q' "$crate")"
+          # The resolver passes absent unmapped names through unchanged, so a
+          # fixed-list member removed from the workspace would reach the test
+          # loop below and abort it with "package ID specification <crate> did
+          # not match any packages". Workspace membership is decided by the tree
+          # that is actually checked out, so resolve all three owner lists
+          # against it exactly once and feed the filtered lists to the test
+          # command. An empty filtered list runs no test command rather than an
+          # invalid one.
+          # The runner's jq.exe ends every line with CRLF. mapfile keeps the CR
+          # on each name while grep drops it from the member file, so no name
+          # would ever match and every owner would be skipped: strip it from
+          # both reads.
+          metadata_ok=0
+          if cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"; then
+            jq -r '.packages[].name' "$RUNNER_TEMP/workspace-metadata.json" | tr -d '\r' > "$RUNNER_TEMP/workspace-members.txt"
+            metadata_ok=1
+          else
+            echo "::warning::cargo metadata failed; running the planned owners unchanged"
+          fi
+          filter_list() {
+            local input="$1"
+            if [[ "$metadata_ok" -ne 1 ]]; then
+              printf '%s' "$input"
+              return
             fi
-            if grep -qxF -- "${crate%$'\r'}" "$RUNNER_TEMP/workspace-members.txt"; then
-              echo "   without a trailing CR: kept"
-            else
-              echo "   without a trailing CR: still skipped"
-            fi
-          done
-          echo "--- is the member listed at all"
-          grep -n -- "mesh-llm-config" "$RUNNER_TEMP/workspace-members.txt" | od -c | head -3 || echo "no match"
+            local -a requested=()
+            mapfile -t requested < <(jq -r '.[]' <<<"$input" | tr -d '\r')
+            local -a kept=()
+            local crate
+            for crate in "${requested[@]}"; do
+              if grep -qxF -- "$crate" "$RUNNER_TEMP/workspace-members.txt"; then
+                kept+=("$crate")
+              else
+                echo "::warning::platform plans $crate, which is not a workspace member of the checked-out revision; skipping it" >&2
+              fi
+            done
+            jq -cn --args '$ARGS.positional' ${kept[@]+"${kept[@]}"}
+          }
+          {
+            printf 'crates=%s\n' "$(filter_list "$SHARED_CRATES")"
+            printf 'windows_crates=%s\n' "$(filter_list "$WINDOWS_CRATES")"
+            printf 'windows_dynamic_crates=%s\n' "$(filter_list "$WINDOWS_DYNAMIC_CRATES")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Show what the test step would receive
+        shell: pwsh
+        env:
+          TEST_CRATES: ${{ steps.windows_test_packages.outputs.crates }}
+          WINDOWS_TEST_CRATES: ${{ steps.windows_test_packages.outputs.windows_crates }}
+          WINDOWS_DYNAMIC_TEST_CRATES: ${{ steps.windows_test_packages.outputs.windows_dynamic_crates }}
+        run: |
+          foreach ($name in 'TEST_CRATES','WINDOWS_TEST_CRATES','WINDOWS_DYNAMIC_TEST_CRATES') {
+            $list = @((Get-Item "env:$name").Value | ConvertFrom-Json)
+            "$name : $($list.Count) -> $($list -join ', ')"
+          }
