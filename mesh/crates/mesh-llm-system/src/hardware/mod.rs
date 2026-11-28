@@ -298,7 +298,7 @@ fn read_system_ram_bytes() -> u64 {
     .unwrap_or(0)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", any(feature = "skippy-devices", test)))]
 fn read_system_ram_bytes() -> u64 {
     read_windows_total_ram_bytes().unwrap_or(0)
 }
@@ -389,7 +389,13 @@ fn read_windows_total_ram_bytes() -> Option<u64> {
 /// none) keep a zero entry so this stays index-aligned with the adapter name
 /// list that `hydrate_gpu_facts_with_identities` indexes into. Dropping those
 /// entries shifts every later adapter's VRAM onto the wrong device.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(not(feature = "skippy-devices"), feature = "dynamic-native-runtime")
+    ),
+    test
+))]
 fn windows_per_gpu_vram(controllers: &[(String, u64)]) -> Vec<u64> {
     controllers.iter().map(|(_, ram)| *ram).collect()
 }
@@ -401,7 +407,13 @@ fn windows_per_gpu_vram(controllers: &[(String, u64)]) -> Vec<u64> {
 /// That is the misalignment #1163 fixed for `AdapterRAM` and it must not come
 /// back here. Identical cards share a name, so equal names are consumed in
 /// order. An adapter with no usable entry keeps whatever CIM reported.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(not(feature = "skippy-devices"), feature = "dynamic-native-runtime")
+    ),
+    test
+))]
 fn merge_adapter_memory(
     controllers: &[(String, u64)],
     adapter_memory: &[(String, u64)],
@@ -430,7 +442,10 @@ fn merge_adapter_memory(
 /// carry the property leaves it false even under `-ErrorAction SilentlyContinue`,
 /// which would make `powershell_output` discard a perfectly good JSON body. An
 /// adapter without an entry is an ordinary outcome here, not a failure.
-#[cfg(target_os = "windows")]
+#[cfg(all(
+    target_os = "windows",
+    any(not(feature = "skippy-devices"), feature = "dynamic-native-runtime")
+))]
 fn read_windows_adapter_memory() -> Vec<(String, u64)> {
     let Some(output) = powershell_output(
         r"Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue; $q = $p.'HardwareInformation.qwMemorySize'; if ($q) { [pscustomobject]@{ Name = $p.DriverDesc; Bytes = [uint64]$q } } } | ConvertTo-Json -Compress; exit 0",
@@ -440,7 +455,13 @@ fn read_windows_adapter_memory() -> Vec<(String, u64)> {
     parse_windows_adapter_memory_json(&output)
 }
 
-#[cfg(target_os = "windows")]
+/// Only the Windows survey in `default_collector.rs` reads the adapters, and
+/// it is compiled out when `skippy-devices` supplies the devices without the
+/// dynamic runtime, so these helpers follow its `cfg`.
+#[cfg(all(
+    target_os = "windows",
+    any(not(feature = "skippy-devices"), feature = "dynamic-native-runtime")
+))]
 fn read_windows_video_controllers() -> Vec<(String, u64)> {
     let Some(output) = powershell_output(
         "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
