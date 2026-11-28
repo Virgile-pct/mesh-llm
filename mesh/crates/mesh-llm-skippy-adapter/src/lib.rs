@@ -12,9 +12,17 @@ pub use skippy_api::kv_cache::{KvCachePolicy, KvCacheType};
 pub use skippy_api::package::SkippyPackageIdentity;
 pub use stage::single_stage_config;
 
-/// Preserve Mesh's existing application cache location when calling Skippy.
+/// Mesh's application cache, `<platform cache>/mesh-llm`, handed to Skippy
+/// explicitly. Skippy's `application_cache_dir()` is `<platform cache>/skippy`,
+/// so delegating to it would move model usage, metadata, weight digests, the
+/// blobstore and materialized stages away from where earlier releases left
+/// them. `mesh_llm_system::native_runtime_install::mesh_cache_dir` resolves
+/// the same directory.
 pub fn mesh_cache_dir() -> std::path::PathBuf {
-    skippy_model_hf::application_cache_dir()
+    dirs::cache_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
+        .unwrap_or_else(|| std::env::temp_dir().join("mesh-llm-cache"))
+        .join("mesh-llm")
 }
 
 pub fn synthetic_direct_gguf_package(

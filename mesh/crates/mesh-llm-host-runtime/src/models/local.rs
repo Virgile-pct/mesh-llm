@@ -61,3 +61,15 @@ pub fn is_served_model_ref(model_ref: &str) -> bool {
         .map(|refs| refs.contains(model_ref))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod mesh_cache_location_tests {
+    #[test]
+    fn the_adapter_and_the_runtime_installer_agree_on_the_mesh_cache() {
+        assert_eq!(
+            super::mesh_llm_cache_dir(),
+            mesh_llm_system::native_runtime_install::mesh_cache_dir()
+        );
+        assert_eq!(super::mesh_llm_cache_dir().file_name().unwrap(), "mesh-llm");
+    }
+}

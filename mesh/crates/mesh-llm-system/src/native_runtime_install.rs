@@ -27,7 +27,8 @@ pub const SKIPPY_RELEASES_URL: &str = "https://github.com/Mesh-LLM/skippy/releas
 /// inputs. Empty values count as unset.
 ///
 /// Cache directory and manifest URL are single values: an argument beats the
-/// Mesh variable, which beats the Skippy one.
+/// Mesh variable, which beats the Skippy one. With neither variable the cache
+/// is `<mesh cache>/native-runtimes`, not Skippy's own default.
 ///
 /// Bundle directories are a search list: arguments, then the Mesh variable,
 /// then the Skippy variable, then the directories beside the executable.
@@ -76,8 +77,38 @@ fn mesh_bundle_dirs(explicit: &[PathBuf]) -> Vec<PathBuf> {
     )
 }
 
-fn mesh_cache_dir() -> Option<PathBuf> {
-    cache_dir_from(std::env::var_os(MESH_NATIVE_RUNTIME_CACHE_DIR_ENV))
+/// Mesh's application cache, `<platform cache>/mesh-llm`. Skippy's own
+/// default is `<platform cache>/skippy`; Mesh keeps the directory its
+/// releases have always used, so an upgrade finds what it cached before.
+/// `mesh_llm_skippy_adapter::mesh_cache_dir` resolves the same directory.
+pub fn mesh_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
+        .unwrap_or_else(|| std::env::temp_dir().join("mesh-llm-cache"))
+        .join("mesh-llm")
+}
+
+/// The runtime cache Mesh hands Skippy: the Mesh variable, else
+/// `<mesh cache>/native-runtimes` unless the Skippy variable is set, in which
+/// case Skippy reads it itself.
+fn runtime_cache_dir_from(
+    mesh: Option<OsString>,
+    skippy: Option<OsString>,
+    mesh_cache: PathBuf,
+) -> Option<PathBuf> {
+    cache_dir_from(mesh).or_else(|| {
+        cache_dir_from(skippy)
+            .is_none()
+            .then(|| mesh_cache.join("native-runtimes"))
+    })
+}
+
+fn mesh_runtime_cache_dir() -> Option<PathBuf> {
+    runtime_cache_dir_from(
+        std::env::var_os(MESH_NATIVE_RUNTIME_CACHE_DIR_ENV),
+        std::env::var_os(NATIVE_RUNTIME_CACHE_DIR_ENV),
+        mesh_cache_dir(),
+    )
 }
 
 fn mesh_manifest_url() -> Option<String> {
@@ -85,7 +116,7 @@ fn mesh_manifest_url() -> Option<String> {
 }
 
 pub fn native_runtime_cache(cache_dir: Option<&Path>) -> anyhow::Result<NativeRuntimeCache> {
-    let mesh = mesh_cache_dir();
+    let mesh = mesh_runtime_cache_dir();
     skippy_runtime_install::native_runtime_cache(cache_dir.or(mesh.as_deref()))
 }
 
@@ -95,7 +126,7 @@ pub fn default_native_runtime_cache() -> anyhow::Result<NativeRuntimeCache> {
 
 fn with_mesh_install_env(mut options: NativeRuntimeInstallOptions) -> NativeRuntimeInstallOptions {
     options.bundle_dirs = mesh_bundle_dirs(&options.bundle_dirs);
-    options.cache_dir = options.cache_dir.or_else(mesh_cache_dir);
+    options.cache_dir = options.cache_dir.or_else(mesh_runtime_cache_dir);
     if options.manifest_path.is_none() {
         options.manifest_url = options.manifest_url.or_else(mesh_manifest_url);
     }
@@ -291,6 +322,37 @@ mod tests {
         assert_eq!(
             manifest_url_from(Some("https://example.invalid/m.json".into())).as_deref(),
             Some("https://example.invalid/m.json")
+        );
+    }
+
+    #[test]
+    fn the_mesh_cache_is_the_directory_releases_have_always_used() {
+        let dir = mesh_cache_dir();
+        assert_eq!(dir.file_name().unwrap(), "mesh-llm");
+        if let Some(platform) = dirs::cache_dir() {
+            assert_eq!(dir, platform.join("mesh-llm"));
+        }
+    }
+
+    #[test]
+    fn the_runtime_cache_defaults_under_the_mesh_cache_unless_a_variable_is_set() {
+        let mesh_cache = PathBuf::from("/cache/mesh-llm");
+        assert_eq!(
+            runtime_cache_dir_from(None, None, mesh_cache.clone()),
+            Some(PathBuf::from("/cache/mesh-llm/native-runtimes"))
+        );
+        assert_eq!(
+            runtime_cache_dir_from(Some("".into()), Some("".into()), mesh_cache.clone()),
+            Some(PathBuf::from("/cache/mesh-llm/native-runtimes"))
+        );
+        assert_eq!(
+            runtime_cache_dir_from(Some("/m".into()), Some("/s".into()), mesh_cache.clone()),
+            Some(PathBuf::from("/m"))
+        );
+        // Skippy reads its own variable when Mesh passes nothing.
+        assert_eq!(
+            runtime_cache_dir_from(None, Some("/s".into()), mesh_cache),
+            None
         );
     }
 

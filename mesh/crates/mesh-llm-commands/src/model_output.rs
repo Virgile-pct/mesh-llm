@@ -2,7 +2,7 @@
 pub fn model_output_context() -> skippy_commands::models::ModelCommandContext {
     skippy_commands::models::ModelCommandContext {
         program: "mesh-llm",
-        cache_root: skippy_model_hf::application_cache_dir(),
+        cache_root: mesh_llm_system::native_runtime_install::mesh_cache_dir(),
         fit_budget_bytes: mesh_llm_system::capacity::local_fit_budget_bytes(
             &mesh_llm_system::hardware::survey(),
         ),
